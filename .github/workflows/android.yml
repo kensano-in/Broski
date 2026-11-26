@@ -48,12 +48,16 @@ jobs:
           test -s app/src/main/java/com/verlyn/audio/MainActivity.kt
           test -s app/src/main/java/com/verlyn/audio/VerlynAudioEngine.kt
 
-      - name: Correct Android SDK API symbols
+      - name: Correct Android SDK API symbols and Kotlin setters
         run: |
           sed -i 's/import android.media.AudioEffect/import android.media.audiofx.AudioEffect/' \
             app/src/main/java/com/verlyn/audio/MainActivity.kt
           sed -i 's/VARIANT_FAVOR_FREQUENCY,/VARIANT_FAVOR_FREQUENCY_RESOLUTION,/' \
             app/src/main/java/com/verlyn/audio/VerlynAudioEngine.kt
+          sed -i 's/setSessionCompatibility(/updateSessionCompatibility(/g' \
+            app/src/main/java/com/verlyn/audio/MainActivity.kt
+          sed -i 's/setMusicVolume(/updateMusicVolume(/g' \
+            app/src/main/java/com/verlyn/audio/MainActivity.kt
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
