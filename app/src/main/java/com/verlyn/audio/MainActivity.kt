@@ -2,7 +2,6 @@ package com.verlyn.audio
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
@@ -10,10 +9,11 @@ import android.bluetooth.le.ScanResult
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -43,6 +43,17 @@ class MainActivity : ComponentActivity() {
     private var scanning by mutableStateOf(false)
     private var adapter: BluetoothAdapter? = null
     private var scanner: BluetoothLeScanner? = null
+    private var scanActive = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val scanTimeout = Runnable {
+        stopScan()
+        status = if (devices.isEmpty()) {
+            "Scan complete. No nearby devices found."
+        } else {
+            "Scan complete. Found ${devices.size} device(s)."
+        }
+    }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -72,8 +83,24 @@ class MainActivity : ComponentActivity() {
 
         override fun onScanFailed(errorCode: Int) {
             runOnUiThread {
+                mainHandler.removeCallbacks(scanTimeout)
+                scanActive = false
                 scanning = false
-                status = "Scan failed (code $errorCode). Try again."
+                status = when (errorCode) {
+                    SCAN_FAILED_ALREADY_STARTED ->
+                        "A Bluetooth scan was already active. Tap Scan again."
+                    SCAN_FAILED_APPLICATION_REGISTRATION_FAILED ->
+                        "Android could not register the Bluetooth scan. Toggle Bluetooth and retry."
+                    SCAN_FAILED_INTERNAL_ERROR ->
+                        "Android Bluetooth reported an internal scan error. Retry in a moment."
+                    SCAN_FAILED_FEATURE_UNSUPPORTED ->
+                        "This phone does not support the requested BLE scan."
+                    SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES ->
+                        "Bluetooth scan resources are busy. Close other scanning apps and retry."
+                    SCAN_FAILED_SCANNING_TOO_FREQUENTLY ->
+                        "Scans are happening too frequently. Wait a few seconds and retry."
+                    else -> "Bluetooth scan failed (code $errorCode). Tap Scan to retry."
+                }
             }
         }
     }
@@ -143,28 +170,73 @@ class MainActivity : ComponentActivity() {
     @Suppress("MissingPermission")
     private fun startScan() {
         if (!hasPermissions()) return
+        if (scanActive) {
+            status = "Bluetooth discovery is already running."
+            return
+        }
         if (adapter?.isEnabled != true) {
             status = "Turn Bluetooth on, then tap Scan."
             scanning = false
             return
         }
+
         try {
             scanner = adapter?.bluetoothLeScanner
-            scanner?.startScan(scanCallback)
+            val activeScanner = scanner
+            if (activeScanner == null) {
+                status = "Bluetooth LE scanning is unavailable on this phone."
+                scanning = false
+                return
+            }
+
+            devices.removeAll { !it.paired }
+            scanActive = true
             scanning = true
-            status = "Scanning for nearby Bluetooth Low Energy devices…"
+            status = "Scanning nearby Bluetooth LE devices for 12 seconds…"
+            activeScanner.startScan(scanCallback)
+            mainHandler.removeCallbacks(scanTimeout)
+            mainHandler.postDelayed(scanTimeout, 12_000L)
         } catch (_: SecurityException) {
-            status = "Bluetooth permission was not granted."
+            scanActive = false
             scanning = false
+            status = "Bluetooth permission was not granted. Check app permissions."
+        } catch (e: IllegalStateException) {
+            scanActive = false
+            scanning = false
+            status = "Bluetooth scanner is not ready. Toggle Bluetooth and retry."
         } catch (e: Exception) {
-            status = "Unable to start scan: ${e.message ?: "unknown error"}"
+            scanActive = false
             scanning = false
+            status = "Unable to start scan: ${e.message ?: "unknown error"}"
         }
     }
 
     @Suppress("MissingPermission")
+    private fun stopScan() {
+        mainHandler.removeCallbacks(scanTimeout)
+        if (scanActive) {
+            try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
+        }
+        scanActive = false
+        scanning = false
+    }
+
+    override fun onPause() {
+        stopScan()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (adapter != null && hasPermissions() && adapter?.isEnabled == true) {
+            loadPairedDevices()
+            startScan()
+        }
+    }
+
     override fun onDestroy() {
-        try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
+        stopScan()
+        mainHandler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
 }
@@ -247,10 +319,10 @@ private fun VerlynScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("NEARBY DEVICES", fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
                     modifier = Modifier.weight(1f))
-                TextButton(onClick = onScan) {
+                TextButton(onClick = onScan, enabled = !scanning) {
                     Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
                     Spacer(Modifier.width(5.dp))
-                    Text(if (scanning) "SCAN AGAIN" else "SCAN")
+                    Text(if (scanning) "SCANNING" else "SCAN")
                 }
             }
             Text(status, color = Muted, fontSize = 12.sp)
@@ -287,7 +359,7 @@ private fun VerlynScreen(
                     }
                 }
             }
-            Text("VERLYN  •  BUILD 0.1.0", color = Color(0xFF586171), fontSize = 9.sp,
+            Text("VERLYN  •  BUILD 0.1.1", color = Color(0xFF586171), fontSize = 9.sp,
                 letterSpacing = 1.4.sp, modifier = Modifier.align(Alignment.CenterHorizontally).padding(vertical = 14.dp))
         }
     }
