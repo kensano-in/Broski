@@ -1602,7 +1602,11 @@ class MainActivity : ComponentActivity() {
             val manager = getSystemService(COMPANION_DEVICE_SERVICE) as CompanionDeviceManager
             manager.associate(request, object : CompanionDeviceManager.Callback() {
                 override fun onDeviceFound(chooserLauncher: android.content.IntentSender) {
-                    companionAssociationLauncher.launch(IntentSenderRequest.Builder(chooserLauncher).build())
+                    runCatching {
+                        companionAssociationLauncher.launch(IntentSenderRequest.Builder(chooserLauncher).build())
+                    }.onFailure {
+                        Toast.makeText(this@MainActivity, "Companion chooser could not open · " + (it.message ?: "unavailable"), Toast.LENGTH_LONG).show()
+                    }
                 }
                 override fun onFailure(error: CharSequence?) {
                     runOnUiThread {
