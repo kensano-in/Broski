@@ -1956,9 +1956,9 @@ class MainActivity : ComponentActivity() {
         val limited = limiterEnabled
         val channelBalance = if (balanceEnabled) balance else 0f
         lifecycleScope.launch(Dispatchers.Default) {
-            if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(gains, currentPreamp, enabled, limited, channelBalance)
-            else audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
-            if (sessionCompatibility) compatibilitySessions.forEach {
+            // No app-global session exists. Apply to attached positive media sessions only.
+            audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
+            if (sessionCompatibility) compatibilitySessions.filter { it > 0 }.forEach {
                 audioEngine.attachSession(it, "Unknown media app", gains, currentPreamp, enabled, limited, channelBalance)
             }
         }
