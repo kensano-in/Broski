@@ -454,7 +454,7 @@ private fun SmartActionsPage(state: VerlynProUiState, actions: VerlynProUiAction
     )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ProCard {
-            Text("HEADSET COMMAND MODE", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = VBlueLight)
+            Text("HEADSET COMMAND MODE", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF60A5FA))
             Text("Long-hold the JBL centre button to open Command Mode. Volume keys remain ordinary volume controls outside that window; a single centre tap stays native.", color = VMuted, fontSize = 10.sp)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
