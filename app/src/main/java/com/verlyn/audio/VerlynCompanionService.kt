@@ -1,8 +1,9 @@
+@file:Suppress("OVERRIDE_DEPRECATION")
+
 package com.verlyn.audio
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
-import android.bluetooth.le.ScanFilter
 import android.companion.AssociationInfo
 import android.companion.CompanionDeviceService
 import android.content.BroadcastReceiver
