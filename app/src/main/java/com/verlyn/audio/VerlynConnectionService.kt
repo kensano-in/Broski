@@ -547,7 +547,7 @@ class VerlynConnectionService : Service() {
 
     private fun hasActiveMediaPlayback(): Boolean = runCatching {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            audioManager.activePlaybackConfigurations.any { it.isActive }
+            audioManager.activePlaybackConfigurations.isNotEmpty()
     }.getOrDefault(false)
 
     private fun startForegroundCompat(startId: Int, action: String?): Boolean {
