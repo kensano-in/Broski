@@ -33,10 +33,10 @@ class VerlynVoiceInteractionSessionService : VoiceInteractionSessionService() {
         VerlynVoiceInteractionSession(this)
 }
 
-private class VerlynVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
+private class VerlynVoiceInteractionSession(private val appContext: Context) : VoiceInteractionSession(appContext) {
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
-        CommandModeController.onAssistTriggered(context)
+        CommandModeController.onAssistTriggered(appContext)
         // A voice interaction session is transient here; never leave a blank overlay on screen.
         hide()
     }
