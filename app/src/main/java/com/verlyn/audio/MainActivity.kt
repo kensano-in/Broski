@@ -1834,7 +1834,7 @@ class MainActivity : ComponentActivity() {
             else -> "Unavailable"
         }
         val dump = buildString {
-            appendLine("VERLYN 0.4.1 — COMPLETE AUDIO / BLUETOOTH DUMP")
+            appendLine("VERLYN 0.4.2 — COMPLETE AUDIO / BLUETOOTH DUMP")
             appendLine()
             appendLine("LAST CRASH REPORT")
             appendLine(lastCrashReport.ifBlank { "No previous crash recorded" })
@@ -1899,7 +1899,7 @@ class MainActivity : ComponentActivity() {
         }
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Verlyn diagnostic dump", dump))
-        Toast.makeText(this, "VERLYN 0.4.0 diagnostic dump copied", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "VERLYN 0.4.2 diagnostic dump copied", Toast.LENGTH_SHORT).show()
     }
 
     private fun updateSessionCompatibility(enabled: Boolean) {
