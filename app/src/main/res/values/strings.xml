@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="verlyn_accessibility_description">Detects configured volume-key hold and double-press gestures to run Verlyn Smart Actions. Short volume presses are replayed as normal volume adjustments.</string>
+</resources>

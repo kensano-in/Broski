@@ -19,6 +19,7 @@ import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
@@ -30,6 +31,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
+import android.provider.Settings
 import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -60,6 +62,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.ArrayDeque
@@ -129,6 +134,17 @@ class MainActivity : ComponentActivity() {
     private val packetLog = mutableStateListOf<String>()
     private val airohaCaptureLog = mutableStateListOf<String>()
     private val classicSdpUuids = mutableStateListOf<UUID>()
+    private val rfcommCaptureLog = mutableStateListOf<String>()
+    private val customPresets = mutableStateListOf<EqPreset>()
+    private val smartTriggerActions = mutableStateMapOf<String, String>()
+    private lateinit var rfcommEngine: ClassicRfcommEngine
+    private lateinit var voiceAnnouncer: VoiceAnnouncer
+    private var rfcommState by mutableStateOf("Disconnected")
+    private var headsetBatteryPercent by mutableStateOf<Int?>(null)
+    private var headsetBatteryDetail by mutableStateOf("Connect Fast Pair RFCOMM to receive headset battery events")
+    private var balanceEnabled by mutableStateOf(false)
+    private var balance by mutableFloatStateOf(0f)
+    private var accessibilityEnabled by mutableStateOf(false)
     private val gattOperationQueue = ArrayDeque<GattOperation>()
     private var activeGattOperation: GattOperation? = null
     private var pendingGattDevice: BluetoothDevice? = null
@@ -437,6 +453,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val smartActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.getStringExtra(VerlynSmartButtonService.EXTRA_ACTION)) {
+                "apply_preset" -> intent.getStringExtra(VerlynSmartButtonService.EXTRA_VALUE)?.let { applyPreset(it) }
+                "limiter_changed" -> setLimiterEnabled(intent.getBooleanExtra(VerlynSmartButtonService.EXTRA_ENABLED, limiterEnabled))
+            }
+        }
+    }
+
     private val audioEffectSessionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -445,7 +470,7 @@ class MainActivity : ComponentActivity() {
             if (action == AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION) {
                 if (sessionCompatibility) {
                     compatibilitySessions.add(sessionId)
-                    audioEngine.attachSession(sessionId, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled)
+                    audioEngine.attachSession(sessionId, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
                     appendLog("Audio effect session opened: $sessionId")
                 }
             } else if (action == AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION) {
@@ -464,82 +489,133 @@ class MainActivity : ComponentActivity() {
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         loadAudioPreferences()
         audioEngine = VerlynAudioEngine(this) { value -> runOnUiThread { audioEffectStatus = value } }
-        audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled)
+        voiceAnnouncer = VoiceAnnouncer(this)
+        rfcommEngine = ClassicRfcommEngine(
+            onStatus = { value -> runOnUiThread { rfcommState = value; appendLog("RFCOMM: " + value) } },
+            onPacket = { uuid, bytes ->
+                runOnUiThread {
+                    val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+                    val hex = bytes.toHexString()
+                    val line = "[" + time + "] UUID=" + uuid + " bytes=" + bytes.size + " HEX[" + hex + "]"
+                    rfcommCaptureLog.add(0, line)
+                    while (rfcommCaptureLog.size > 500) rfcommCaptureLog.removeAt(rfcommCaptureLog.lastIndex)
+                    appendLog("RFCOMM RX UUID=" + uuid + " bytes=" + bytes.size + " HEX[" + hex + "]")
+                }
+            },
+            onBattery = { levels ->
+                runOnUiThread {
+                    val known = levels.filter { it in 0..100 }
+                    headsetBatteryPercent = known.firstOrNull()
+                    headsetBatteryDetail = when {
+                        known.isEmpty() -> "Fast Pair battery event received · levels unknown"
+                        known.size == 1 -> "Fast Pair Message Stream · " + known.first() + "% reported"
+                        else -> "Fast Pair component levels · " + known.joinToString("% / ", postfix = "%")
+                    }
+                    known.firstOrNull()?.let { preferences.edit().putInt("headset_battery_percent", it).apply() }
+                    appendLog("Fast Pair battery event: " + known.joinToString(", "))
+                }
+            }
+        )
+        audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
         refreshVolume()
         registerBluetoothReceiver()
         registerAudioEffectReceiver()
+        registerSmartActionReceiver()
+        loadSmartPreferences()
+        observeCustomPresets()
         requestProfileProxies()
 
         setContent {
-            VerlynTheme {
-                VerlynApp(
+            VerlynProApp(
+                state = VerlynProUiState(
                     selectedTab = selectedTab,
-                    onTabChange = { selectedTab = it },
-                    bleState = bleState,
                     audioConnected = a2dpConnected || headsetConnected,
                     a2dpConnected = a2dpConnected,
                     headsetConnected = headsetConnected,
-                    batteryLevel = batteryLevel,
-                    rssi = rssi,
-                    mtu = mtu,
+                    bleState = bleState,
+                    rfcommState = rfcommState,
+                    batteryPercent = headsetBatteryPercent ?: batteryLevel,
+                    batteryDetail = if (headsetBatteryPercent != null) headsetBatteryDetail else if (batteryLevel != null) "Standard BLE Battery Service · " + batteryLevel + "%" else "Unavailable · Fast Pair battery event not received",
                     route = outputRoute,
                     appStatus = appStatus,
                     scanning = scanning,
-                    devices = deviceRows.toList(),
-                    onScan = { checkPermissionsAndScan() },
-                    onConnect = { connectGatt(it) },
-                    onDisconnect = { disconnectGatt() },
+                    classicDeviceFound = classicJblDevice != null,
+                    classicSdpStatus = classicSdpStatus,
+                    classicSdpUuids = classicSdpUuids.map { it.toString() },
+                    gattSnapshotTitle = if (gattSnapshotCached || bleState == "DISCONNECTED") "Last discovered GATT snapshot (cached)" else "Live GATT snapshot",
+                    gattSnapshotLines = gattServices.flatMap { service ->
+                        listOf("SERVICE " + serviceDisplayName(service.uuid) + " · " + service.uuid) +
+                            service.characteristics.map { row -> "  CHAR " + row.uuid + " · " + propertyNames(row.properties).joinToString(", ") + " · " + row.valueHex }
+                    },
+                    airohaListening = airohaListening,
+                    airohaCanListen = bleState == "CONNECTED" && findAirohaRxRow()?.let {
+                        it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 && it.characteristic.getDescriptor(CccdUuid) != null
+                    } == true,
+                    airohaCaptureLog = airohaCaptureLog.toList(),
+                    rfcommCaptureLog = rfcommCaptureLog.toList(),
+                    packetLog = packetLog.toList(),
                     gains = eqGains.toList(),
-                    onGainChange = { index, value ->
-                        eqGains[index] = value
-                        selectedPreset = "Custom"
-                        saveAudioPreferences()
-                        applyAudioSettings()
-                    },
-                    preamp = preamp,
-                    onPreampChange = {
-                        preamp = it; selectedPreset = "Custom"; saveAudioPreferences(); applyAudioSettings()
-                    },
                     eqEnabled = eqEnabled,
-                    onEqEnabledChange = { eqEnabled = it; saveAudioPreferences(); applyAudioSettings() },
+                    preamp = preamp,
                     limiterEnabled = limiterEnabled,
-                    onLimiterChange = { limiterEnabled = it; saveAudioPreferences(); applyAudioSettings() },
-                    sessionCompatibility = sessionCompatibility,
-                    onSessionCompatibilityChange = { updateSessionCompatibility(it) },
                     effectStatus = audioEffectStatus,
                     selectedPreset = selectedPreset,
-                    onPreset = { applyPreset(it) },
-                    volume = musicVolume,
-                    maxVolume = maxMusicVolume,
-                    onVolumeChange = { updateMusicVolume(it) },
-                    onMediaKey = { sendMediaKey(it) },
-                    services = gattServices.toList(),
-                    snapshotCached = gattSnapshotCached,
-                    airohaListening = airohaListening,
-                    canListenAirohaRx = bleState == "CONNECTED" && findAirohaRxRow()?.let {
-                        it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 &&
-                            it.characteristic.getDescriptor(CccdUuid) != null
-                    } == true,
-                    onToggleAirohaListener = { toggleAirohaRxListener() },
-                    airohaCaptureLog = airohaCaptureLog.toList(),
-                    classicSdpUuids = classicSdpUuids.toList(),
-                    classicSdpStatus = classicSdpStatus,
-                    canScanClassicSdp = classicJblDevice != null,
+                    customPresets = customPresets.toList(),
+                    balanceEnabled = balanceEnabled,
+                    balance = balance,
+                    sessionCompatibility = sessionCompatibility,
+                    triggerActions = smartTriggerActions.toMap(),
+                    accessibilityEnabled = accessibilityEnabled
+                ),
+                actions = VerlynProUiActions(
+                    onTabChange = { selectedTab = it },
+                    onConnectHeadset = { connectFastPairRfcomm() },
+                    onDisconnectHeadset = { rfcommEngine.disconnect() },
+                    onScan = { checkPermissionsAndScan() },
+                    onBleConnect = { connectBleHeadset() },
+                    onBleDisconnect = { disconnectGatt() },
+                    onRfcommConnect = { connectRfcommByUuid(it) },
+                    onRfcommDisconnect = { rfcommEngine.disconnect() },
                     onScanClassicSdp = { scanClassicSdpUuids() },
-                    inspectorExpanded = inspectorExpanded,
-                    onInspectorExpanded = { inspectorExpanded = it },
-                    onReadCharacteristic = { readCharacteristic(it) },
-                    onToggleNotify = { toggleNotifications(it) },
-                    onRequestWrite = { writeTarget = it; writeHexInput = "" },
-                    packetLog = packetLog.toList(),
+                    onAirohaListener = { toggleAirohaRxListener() },
                     onCopyDump = { copyGattDump() },
-                    writeTarget = writeTarget,
-                    writeHexInput = writeHexInput,
-                    onWriteHexChange = { writeHexInput = it },
-                    onConfirmWrite = { writeSelectedCharacteristic() },
-                    onDismissWrite = { writeTarget = null }
+                    onGainChange = { index, value ->
+                        if (index in 0..9) {
+                            eqGains[index] = value.coerceIn(-12f, 12f)
+                            selectedPreset = "Custom"
+                            saveAudioPreferences()
+                            applyAudioSettings()
+                        }
+                    },
+                    onEqEnabledChange = { eqEnabled = it; saveAudioPreferences(); applyAudioSettings() },
+                    onPreset = { applyPreset(it) },
+                    onPreampChange = { preamp = it.coerceIn(-12f, 12f); selectedPreset = "Custom"; saveAudioPreferences(); applyAudioSettings() },
+                    onSavePreset = { saveCustomPreset(it) },
+                    onRenamePreset = { oldName, newName -> renameCustomPreset(oldName, newName) },
+                    onDeletePreset = { deleteCustomPreset(it) },
+                    onBalanceEnabledChange = {
+                        balanceEnabled = it
+                        preferences.edit().putBoolean("balance_enabled", it).apply()
+                        applyAudioSettings()
+                    },
+                    onBalanceChange = {
+                        balance = it.coerceIn(-1f, 1f)
+                        preferences.edit().putFloat("balance", balance).apply()
+                        applyAudioSettings()
+                    },
+                    onLimiterChange = { setLimiterEnabled(it) },
+                    onSessionCompatibilityChange = { updateSessionCompatibility(it) },
+                    onTriggerActionChange = { slot, action ->
+                        smartTriggerActions[slot] = action
+                        preferences.edit().putString(slot, action).apply()
+                    },
+                    onOpenAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                    onTestVoice = {
+                        val time = SimpleDateFormat("h:mm a", Locale.US).format(Date())
+                        voiceAnnouncer.speak("It is " + time + ". Verlyn voice output test.")
+                    }
                 )
-            }
+            )
         }
         checkPermissionsAndScan()
         mainHandler.post(routePoll)
@@ -554,6 +630,12 @@ class MainActivity : ComponentActivity() {
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_EXPORTED)
         else registerReceiver(bluetoothStateReceiver, filter)
+    }
+
+    private fun registerSmartActionReceiver() {
+        val filter = IntentFilter(VerlynSmartButtonService.ACTION_SMART_ACTION)
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(smartActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else registerReceiver(smartActionReceiver, filter)
     }
 
     private fun registerAudioEffectReceiver() {
@@ -599,7 +681,7 @@ class MainActivity : ComponentActivity() {
                 upsertDevice(device, name, device.address, null, true)
                 if (isJblName(name) && name.contains("-LE", true) && targetDevice == null) targetDevice = device
                 if (isJblName(name) && !name.contains("-LE", true)) {
-                    classicJblDevice = device
+                    if (classicJblDevice == null || safeAddress(device).equals("88:92:CC:25:46:0E", true)) classicJblDevice = device
                     val cachedUuids = try { device.uuids?.map { it.uuid }.orEmpty() } catch (_: Throwable) { emptyList() }
                     if (classicSdpUuids.isEmpty() && cachedUuids.isNotEmpty()) {
                         classicSdpUuids.addAll(cachedUuids.distinct().sortedBy { it.toString() })
@@ -1033,6 +1115,127 @@ class MainActivity : ComponentActivity() {
         writeTarget = null
     }
 
+    private fun pairedClassicJbl(): BluetoothDevice? {
+        if (classicJblDevice != null) return classicJblDevice
+        if (!hasBluetoothPermissions()) return null
+        return try {
+            adapter?.bondedDevices?.firstOrNull { isJblName(it.name ?: "") && !(it.name ?: "").contains("-LE", true) }
+                ?.also { classicJblDevice = it }
+        } catch (_: Throwable) { null }
+    }
+
+    private fun connectFastPairRfcomm() {
+        if (!hasBluetoothPermissions()) { appStatus = "Bluetooth Connect permission is required for RFCOMM."; checkPermissionsAndScan(); return }
+        val device = pairedClassicJbl()
+        if (device == null) { appStatus = "Pair JBL Tune 770NC in Android Bluetooth settings first."; return }
+        connectRfcomm(device, ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID, "Google Fast Pair Message Stream")
+    }
+
+    private fun connectRfcommByUuid(value: String) {
+        if (!hasBluetoothPermissions()) return
+        val device = pairedClassicJbl()
+        if (device == null) { rfcommState = "Paired Classic JBL Tune 770NC not found"; return }
+        val uuid = try { UUID.fromString(value) } catch (_: Throwable) { rfcommState = "Invalid RFCOMM UUID"; return }
+        val label = when (uuid) {
+            ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID -> "Google Fast Pair Message Stream"
+            ClassicRfcommEngine.JBL_VENDOR_UUID -> "JBL vendor UUID (unverified)"
+            ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID -> "Custom / Airoha candidate UUID (unverified)"
+            else -> "Custom SDP endpoint"
+        }
+        connectRfcomm(device, uuid, label)
+    }
+
+    private fun connectRfcomm(device: BluetoothDevice, uuid: UUID, label: String) {
+        try {
+            appendLog("RFCOMM connect request: " + label + " · " + uuid + " · " + safeAddress(device))
+            rfcommEngine.connect(device, uuid, label)
+        } catch (error: Throwable) {
+            rfcommState = "RFCOMM failed: " + (error.message ?: "unknown error")
+            appendLog(rfcommState)
+        }
+    }
+
+    private fun connectBleHeadset() {
+        val device = deviceRows.firstOrNull { it.isJbl && it.name.contains("-LE", true) }?.device ?: targetDevice
+        if (device == null) { appStatus = "No paired/discovered JBL Tune 770NC-LE device found. Scan first."; checkPermissionsAndScan(); return }
+        connectGatt(device)
+    }
+
+    private fun loadSmartPreferences() {
+        val slots = listOf(
+            "trigger_volume_down_long" to "speak_time",
+            "trigger_volume_up_long" to "speak_battery",
+            "trigger_volume_down_double" to "cycle_eq",
+            "trigger_volume_up_double" to "toggle_limiter"
+        )
+        slots.forEach { (key, defaultValue) -> smartTriggerActions[key] = preferences.getString(key, defaultValue) ?: defaultValue }
+        accessibilityEnabled = isSmartAccessibilityEnabled()
+    }
+
+    private fun isSmartAccessibilityEnabled(): Boolean {
+        return try {
+            val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
+            val expected = ComponentName(this, VerlynSmartButtonService::class.java).flattenToString()
+            enabled.split(':').any { it.equals(expected, ignoreCase = true) }
+        } catch (_: Throwable) { false }
+    }
+
+    private fun observeCustomPresets() {
+        lifecycleScope.launch {
+            EqPresetStore.observe(this@MainActivity).collect { latest ->
+                customPresets.clear()
+                customPresets.addAll(latest)
+                preferences.edit().putString("saved_preset_names", latest.joinToString("\n") { it.name }).apply()
+            }
+        }
+    }
+
+    private fun saveCustomPreset(name: String) {
+        val clean = name.trim()
+        if (clean.isBlank()) return
+        lifecycleScope.launch {
+            try {
+                EqPresetStore.save(this@MainActivity, EqPreset(clean, eqGains.toList(), preamp))
+                selectedPreset = clean
+                saveAudioPreferences()
+                Toast.makeText(this@MainActivity, "EQ preset saved", Toast.LENGTH_SHORT).show()
+            } catch (error: Throwable) {
+                Toast.makeText(this@MainActivity, "Could not save preset: " + (error.message ?: "unknown"), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun renameCustomPreset(oldName: String, newName: String) {
+        val existing = customPresets.firstOrNull { it.name == oldName } ?: return
+        val clean = newName.trim()
+        if (clean.isBlank()) return
+        lifecycleScope.launch {
+            try {
+                EqPresetStore.save(this@MainActivity, existing.copy(name = clean))
+                EqPresetStore.delete(this@MainActivity, oldName)
+                if (selectedPreset == oldName) selectedPreset = clean
+                saveAudioPreferences()
+            } catch (error: Throwable) {
+                Toast.makeText(this@MainActivity, "Rename failed: " + (error.message ?: "unknown"), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun deleteCustomPreset(name: String) {
+        lifecycleScope.launch {
+            EqPresetStore.delete(this@MainActivity, name)
+            if (selectedPreset == name) applyPreset("Flat")
+        }
+    }
+
+    private fun setLimiterEnabled(enabled: Boolean) {
+        limiterEnabled = enabled
+        preferences.edit().putBoolean("limiter_enabled", enabled).apply()
+        applyAudioSettings()
+        if (enabled && musicVolume > (maxMusicVolume * 0.75f).toInt()) updateMusicVolume((maxMusicVolume * 0.75f).toInt())
+        refreshVolume()
+    }
+
     private fun handleClassicUuidBroadcast(intent: Intent) {
         val device = try {
             @Suppress("DEPRECATION")
@@ -1100,13 +1303,18 @@ class MainActivity : ComponentActivity() {
     private fun copyGattDump() {
         val target = targetDevice
         val dump = buildString {
-            appendLine("VERLYN 0.1.4 — BLUETOOTH PROTOCOL DUMP")
+            appendLine("VERLYN 0.2.0 — COMPLETE AUDIO / BLUETOOTH DUMP")
             appendLine("Device: ${target?.let { safeDeviceName(it) } ?: "Not selected"}")
             appendLine("Address: ${target?.let { safeAddress(it) } ?: "Unavailable"}")
             appendLine("BLE state: $bleState")
             appendLine("Snapshot status: ${if (gattSnapshotCached || bleState == "DISCONNECTED") "Last Discovered Snapshot (Cached)" else "Live"}")
             appendLine("MTU: ${mtu ?: "Unavailable"}")
-            appendLine("Battery: ${batteryLevel?.let { "$it%" } ?: "Unavailable"}")
+            appendLine("Battery: " + (headsetBatteryPercent?.let { it.toString() + "%" } ?: batteryLevel?.let { it.toString() + "% (BLE)" } ?: "Unavailable"))
+            appendLine("Battery detail: " + headsetBatteryDetail)
+            appendLine("Classic RFCOMM status: " + rfcommState)
+            appendLine()
+            appendLine("CLASSIC RFCOMM PASSIVE STREAM CAPTURE")
+            if (rfcommCaptureLog.isEmpty()) appendLine("No RFCOMM data captured") else rfcommCaptureLog.asReversed().forEach { appendLine(it) }
             appendLine("RSSI: ${rssi?.let { "$it dBm" } ?: "Unavailable"}")
             appendLine()
             appendLine(if (gattSnapshotCached || bleState == "DISCONNECTED") "Last Discovered Snapshot (Cached)" else "Current GATT Snapshot")
@@ -1163,6 +1371,8 @@ class MainActivity : ComponentActivity() {
         limiterEnabled = preferences.getBoolean("limiter_enabled", true)
         selectedPreset = preferences.getString("preset", "Flat") ?: "Flat"
         sessionCompatibility = preferences.getBoolean("session_compatibility", false)
+        balanceEnabled = preferences.getBoolean("balance_enabled", false)
+        balance = preferences.getFloat("balance", 0f).coerceIn(-1f, 1f)
     }
 
     private fun saveAudioPreferences() {
@@ -1172,30 +1382,40 @@ class MainActivity : ComponentActivity() {
             .putBoolean("eq_enabled", eqEnabled)
             .putBoolean("limiter_enabled", limiterEnabled)
             .putString("preset", selectedPreset)
+            .putBoolean("balance_enabled", balanceEnabled)
+            .putFloat("balance", balance)
             .apply()
     }
 
     private fun applyAudioSettings() {
-        if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled)
-        else audioEngine.apply(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled)
+        if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
+        else audioEngine.apply(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
         if (sessionCompatibility) compatibilitySessions.forEach {
-            audioEngine.attachSession(it, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled)
+            audioEngine.attachSession(it, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
         }
     }
 
     private fun applyPreset(name: String) {
-        if (name != "Custom") {
+        val custom = customPresets.firstOrNull { it.name.equals(name, ignoreCase = true) }
+        if (custom != null) {
+            custom.gains.forEachIndexed { index, value -> eqGains[index] = value }
+            preamp = custom.preamp
+        } else {
             val values = when (name) {
-                "Deep Bass" -> floatArrayOf(5f, 4f, 3f, 1f, 0f, 0f, 0f, 1f, 1f, 1f)
-                "Vocal Boost" -> floatArrayOf(-1f, -1f, 0f, 1f, 2f, 3f, 3f, 2f, 1f, 0f)
+                "Studio" -> floatArrayOf(1f, 1f, 0f, 1f, 2f, 1f, 0f, 1f, 1f, 0f)
+                "Bass" -> floatArrayOf(5f, 4f, 3f, 1f, 0f, 0f, 0f, 0f, 0f, 0f)
                 "Club" -> floatArrayOf(4f, 3f, 1f, 0f, -1f, 0f, 1f, 2f, 3f, 3f)
+                "Extreme Bass" -> floatArrayOf(8f, 7f, 5f, 2f, 0f, -1f, -1f, 0f, 2f, 3f)
+                "Vocal" -> floatArrayOf(-2f, -2f, -1f, 2f, 4f, 4f, 3f, 1f, 0f, -1f)
+                "Jazz" -> floatArrayOf(3f, 2f, 1f, 2f, -1f, -2f, 0f, 2f, 3f, 2f)
                 else -> FloatArray(10) { 0f }
             }
             values.forEachIndexed { index, value -> eqGains[index] = value }
-            preamp = if (name == "Deep Bass" || name == "Club") -2f else 0f
+            preamp = if (name == "Bass" || name == "Club" || name == "Extreme Bass") -2f else 0f
         }
         selectedPreset = name
-        saveAudioPreferences(); applyAudioSettings()
+        saveAudioPreferences()
+        applyAudioSettings()
     }
 
     private fun refreshVolume() {
@@ -1206,7 +1426,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateMusicVolume(value: Int) {
-        val next = value.coerceIn(0, maxMusicVolume)
+        val ceiling = if (limiterEnabled) (maxMusicVolume * 0.75f).toInt().coerceAtLeast(1) else maxMusicVolume
+        val next = value.coerceIn(0, ceiling)
         musicVolume = next
         try { audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0) } catch (_: SecurityException) {}
     }
@@ -1225,6 +1446,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (::audioEngine.isInitialized) applyAudioSettings()
         refreshVolume(); refreshClassicState(); refreshOutputRoute()
+        accessibilityEnabled = isSmartAccessibilityEnabled()
         if (adapter != null && hasBluetoothPermissions() && adapter?.isEnabled == true && !scanActive) {
             loadPairedDevices(); startScan()
         }
@@ -1241,6 +1463,9 @@ class MainActivity : ComponentActivity() {
         gatt = null
         try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Throwable) {}
         try { unregisterReceiver(audioEffectSessionReceiver) } catch (_: Throwable) {}
+        try { unregisterReceiver(smartActionReceiver) } catch (_: Throwable) {}
+        try { rfcommEngine.shutdown() } catch (_: Throwable) {}
+        try { voiceAnnouncer.shutdown() } catch (_: Throwable) {}
         try { a2dpProxy?.let { (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter?.closeProfileProxy(BluetoothProfile.A2DP, it) } } catch (_: Throwable) {}
         try { headsetProxy?.let { (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter?.closeProfileProxy(BluetoothProfile.HEADSET, it) } } catch (_: Throwable) {}
         if (::audioEngine.isInitialized) audioEngine.releaseAll()

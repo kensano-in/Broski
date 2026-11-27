@@ -14,21 +14,21 @@ class VerlynAudioEngine(
 
     companion object {
         val BAND_FREQUENCIES = floatArrayOf(
-            31f, 62f, 125f, 250f, 500f,
+            32f, 64f, 125f, 250f, 500f,
             1000f, 2000f, 4000f, 8000f, 16000f
         )
     }
 
-    fun attachGlobal(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean) {
-        attach(0, gains, preamp, eqEnabled, limiterEnabled)
+    fun attachGlobal(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
+        attach(0, gains, preamp, eqEnabled, limiterEnabled, balance)
     }
 
-    fun attachSession(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean) {
+    fun attachSession(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
         if (sessionId <= 0) return
-        attach(sessionId, gains, preamp, eqEnabled, limiterEnabled)
+        attach(sessionId, gains, preamp, eqEnabled, limiterEnabled, balance)
     }
 
-    private fun attach(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean) {
+    private fun attach(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             onStatus("Bypassed — DynamicsProcessing requires Android 9 or newer")
             return
@@ -55,6 +55,7 @@ class VerlynAudioEngine(
                 .build()
 
             val effect = DynamicsProcessing(0, sessionId, config)
+            applyChannelBalance(effect, preamp, balance)
             effect.enabled = true
             effects[sessionId] = effect
             onStatus(statusForEffects())
@@ -63,7 +64,7 @@ class VerlynAudioEngine(
         }
     }
 
-    fun apply(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean) {
+    fun apply(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             onStatus("Bypassed — DynamicsProcessing requires Android 9 or newer")
             return
@@ -71,6 +72,7 @@ class VerlynAudioEngine(
         effects.toMap().forEach { (sessionId, effect) ->
             try {
                 effect.setInputGainAllChannelsTo(preamp.coerceIn(-12f, 12f))
+                applyChannelBalance(effect, preamp, balance)
                 val eq = effect.getPostEqByChannelIndex(0)
                 eq.setEnabled(eqEnabled)
                 BAND_FREQUENCIES.indices.forEach { index ->
@@ -84,6 +86,15 @@ class VerlynAudioEngine(
             }
         }
         onStatus(statusForEffects())
+    }
+
+    private fun applyChannelBalance(effect: DynamicsProcessing, preamp: Float, balance: Float) {
+        val center = preamp.coerceIn(-12f, 12f)
+        val amount = balance.coerceIn(-1f, 1f) * 12f
+        val left = (center + if (amount > 0f) -amount else 0f).coerceIn(-12f, 12f)
+        val right = (center + if (amount < 0f) amount else 0f).coerceIn(-12f, 12f)
+        effect.setInputGainbyChannel(0, left)
+        effect.setInputGainbyChannel(1, right)
     }
 
     fun detachSession(sessionId: Int) {
