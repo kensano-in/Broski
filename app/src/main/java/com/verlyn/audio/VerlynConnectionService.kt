@@ -1,5 +1,6 @@
 package com.verlyn.audio
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -16,6 +17,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -234,7 +236,7 @@ class VerlynConnectionService : Service() {
 
         bluetoothAdapter?.let { adapter ->
             runCatching {
-                val sticky = registerReceiver(null, IntentFilter(BATTERY_ACTION))
+                val sticky = ContextCompat.registerReceiver(this, null, IntentFilter(BATTERY_ACTION), ContextCompat.RECEIVER_EXPORTED)
                 val level = sticky?.getIntExtra(BATTERY_EXTRA, -1) ?: -1
                 if (level in 0..100) {
                     battery = level
@@ -267,14 +269,14 @@ class VerlynConnectionService : Service() {
             ACTION_COMPANION_APPEARED, ACTION_COMMAND_ASSIST, ACTION_COMMAND_BRIEFING,
             ACTION_COMMAND_NEXT_EQ, ACTION_AUTO_EQ_RULES_CHANGED, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
             ACTION_POWER_OFF_HEADSET, ACTION_MANUAL_RFCOMM_CONNECT,
-            ACTION_MANUAL_RFCOMM_SEND
+            ACTION_MANUAL_RFCOMM_SEND, ACTION_AUDIO_SESSION_EVENT
         )
         if (!isJblA2dpRouteActive() && !isOperationalAction) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        startForegroundCompat()
+        if (!startForegroundCompat(startId, data?.action)) return START_NOT_STICKY
         when (data?.action) {
             ACTION_FORCE_CONNECT -> {
                 ensureTarget()?.let { connectFastPair(it) }
@@ -465,6 +467,7 @@ class VerlynConnectionService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun readNativeBattery(device: BluetoothDevice) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || !hasBluetoothConnectPermission()) return
         val value = runCatching {
             device.javaClass.getMethod("getBatteryLevel").invoke(device) as? Int
         }.getOrNull()
@@ -534,12 +537,59 @@ class VerlynConnectionService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .build()
 
-    private fun startForegroundCompat() {
+    private fun hasBluetoothConnectPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasActiveMediaPlayback(): Boolean = runCatching {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            audioManager.activePlaybackConfigurations.any { it.isActive }
+    }.getOrDefault(false)
+
+    private fun startForegroundCompat(startId: Int, action: String?): Boolean {
         val n = notification()
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-        } else startForeground(NOTIFICATION_ID, n)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return runCatching {
+                startForeground(NOTIFICATION_ID, n)
+                true
+            }.getOrElse { error ->
+                appendRaceLog("Foreground service start denied · " + (error.message ?: error.javaClass.simpleName))
+                stopSelfResult(startId)
+                false
+            }
+        }
+
+        val requestedBluetoothOperation = action in setOf(
+            ACTION_FORCE_CONNECT, ACTION_MANUAL_RFCOMM_CONNECT, ACTION_MANUAL_RFCOMM_SEND,
+            ACTION_SET_NOISE_MODE, ACTION_POWER_OFF_HEADSET, ACTION_COMPANION_APPEARED
+        )
+        var typeMask = 0
+        if (hasBluetoothConnectPermission() && (isJblA2dpRouteActive() || requestedBluetoothOperation)) {
+            typeMask = typeMask or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        }
+        if (hasActiveMediaPlayback()) {
+            typeMask = typeMask or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        }
+        if (typeMask == 0) {
+            appendRaceLog("Foreground start skipped · no active JBL connection or media playback; waiting in standby")
+            stopSelfResult(startId)
+            return false
+        }
+        return try {
+            startForeground(NOTIFICATION_ID, n, typeMask)
+            true
+        } catch (error: SecurityException) {
+            appendRaceLog("Foreground start denied by Android permission/type policy · " +
+                (error.message ?: "SecurityException"))
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            stopSelfResult(startId)
+            false
+        } catch (error: Throwable) {
+            appendRaceLog("Foreground start failed · " + (error.message ?: error.javaClass.simpleName))
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            stopSelfResult(startId)
+            false
+        }
     }
 
     private fun publishState() {
@@ -564,29 +614,28 @@ class VerlynConnectionService : Service() {
 
     @Suppress("DEPRECATION")
     private fun updateCodecStatus(intent: Intent) {
-        if (Build.VERSION.SDK_INT < 33) {
-            activeCodecStatus = "Unavailable · API 33+"
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || !hasBluetoothConnectPermission()) {
+            activeCodecStatus = "Unavailable · Android 13+ Bluetooth permission required"
             publishState()
             return
         }
-        val status = runCatching {
-            intent.getParcelableExtra(
+        activeCodecStatus = runCatching {
+            val status = intent.getParcelableExtra(
                 android.bluetooth.BluetoothCodecStatus.EXTRA_CODEC_STATUS,
                 android.bluetooth.BluetoothCodecStatus::class.java
             )
-        }.getOrNull()
-        val config = status?.codecConfig
-        activeCodecStatus = when (config?.codecType) {
-            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_SBC -> "SBC"
-            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_AAC -> "AAC"
-            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_APTX -> "aptX"
-            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_APTX_HD -> "aptX HD"
-            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_LDAC -> "LDAC"
-            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_LC3 -> "LC3"
-            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_OPUS -> "Opus"
-            null -> "Unavailable"
-            else -> "Other"
-        }
+            when (status?.codecConfig?.codecType) {
+                android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_SBC -> "SBC"
+                android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_AAC -> "AAC"
+                android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_APTX -> "aptX"
+                android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_APTX_HD -> "aptX HD"
+                android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_LDAC -> "LDAC"
+                android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_LC3 -> "LC3"
+                android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_OPUS -> "Opus"
+                null -> "Unavailable"
+                else -> "Other"
+            }
+        }.getOrElse { "Unavailable · " + (it.message ?: it.javaClass.simpleName) }
         appendRaceLog("A2DP CODEC · " + activeCodecStatus)
         publishState()
     }
@@ -601,8 +650,7 @@ class VerlynConnectionService : Service() {
             addAction(BATTERY_ACTION)
             addAction(CODEC_CONFIG_CHANGED_ACTION)
         }
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED)
-        else registerReceiver(bluetoothReceiver, filter)
+        ContextCompat.registerReceiver(this, bluetoothReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
     }
 
     private fun isJblA2dpRouteActive(): Boolean = runCatching {
@@ -1032,8 +1080,7 @@ class VerlynConnectionService : Service() {
         }
         ContextCompat.registerReceiver(this, audioSessionReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
         val aux = IntentFilter(ACTION_AUX_CHANGED)
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(auxiliaryReceiver, aux, Context.RECEIVER_NOT_EXPORTED)
-        else registerReceiver(auxiliaryReceiver, aux)
+        ContextCompat.registerReceiver(this, auxiliaryReceiver, aux, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     private fun registerPlaybackCallback() {
