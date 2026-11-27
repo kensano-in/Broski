@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -86,6 +87,8 @@ private val AirohaRxCharacteristicUuid = UUID.fromString("43484152-2dab-3141-697
 private val AmazonAmaServiceUuid = UUID.fromString("0000fe03-0000-1000-8000-00805f9b34fb")
 private val GoogleFastPairServiceUuid = UUID.fromString("0000fe2c-0000-1000-8000-00805f9b34fb")
 private val DultServiceUuid = UUID.fromString("15190001-12f4-c226-88ed-2ac5579f2a85")
+private const val BATTERY_ACTION = "android.bluetooth.device.action.BATTERY_LEVEL_CHANGED"
+private const val BATTERY_EXTRA = "android.bluetooth.device.extra.BATTERY_LEVEL"
 
 private data class DeviceRow(
     val device: BluetoothDevice,
@@ -184,6 +187,15 @@ class MainActivity : ComponentActivity() {
     }
     private var outputRoute by mutableStateOf("No active output route reported")
     private var audioEffectStatus by mutableStateOf("Initializing")
+    private var serviceBatteryPercent by mutableStateOf<Int?>(null)
+    private var serviceNoiseMode by mutableStateOf("Unknown")
+    private var serviceNoiseReady by mutableStateOf(false)
+    private var serviceNoiseModes by mutableStateOf(emptyList<String>())
+    private var serviceNoiseStatus by mutableStateOf("Waiting for headset")
+    private var clarityValue by mutableFloatStateOf(0f)
+    private var bassBoostEnabled by mutableStateOf(false)
+    private var spatialEnabled by mutableStateOf(false)
+    private var lastAppliedJblRoute: Boolean? = null
     private var scanning by mutableStateOf(false)
     private var selectedTab by mutableIntStateOf(0)
     private var inspectorExpanded by mutableStateOf(true)
@@ -227,12 +239,26 @@ class MainActivity : ComponentActivity() {
         override fun run() { refreshOutputRoute(); mainHandler.postDelayed(this, 4_000L) }
     }
 
+    private val audioApplyTask = Runnable {
+        saveAudioPreferences()
+        val gains = eqGains.toFloatArray()
+        val currentPreamp = preamp
+        val enabled = eqEnabled
+        val limited = limiterEnabled
+        val channelBalance = if (balanceEnabled) balance else 0f
+        lifecycleScope.launch(Dispatchers.Default) {
+            if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(gains, currentPreamp, enabled, limited, channelBalance)
+            else audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
+        }
+    }
+
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             if (result.values.all { it }) {
                 loadPairedDevices()
                 startScan()
                 requestProfileProxies()
+                startConnectionService()
             } else appStatus = "Nearby devices permission is required for Bluetooth discovery."
         }
 
@@ -448,6 +474,10 @@ class MainActivity : ComponentActivity() {
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == BluetoothDevice.ACTION_UUID) handleClassicUuidBroadcast(intent)
+            if (intent?.action == BATTERY_ACTION) {
+                val level = intent.getIntExtra(BATTERY_EXTRA, -1)
+                if (level in 0..100) serviceBatteryPercent = level
+            }
             refreshClassicState()
             refreshOutputRoute()
         }
@@ -458,6 +488,37 @@ class MainActivity : ComponentActivity() {
             when (intent?.getStringExtra(VerlynSmartButtonService.EXTRA_ACTION)) {
                 "apply_preset" -> intent.getStringExtra(VerlynSmartButtonService.EXTRA_VALUE)?.let { applyPreset(it) }
                 "limiter_changed" -> updateLimiterEnabled(intent.getBooleanExtra(VerlynSmartButtonService.EXTRA_ENABLED, limiterEnabled))
+                "bass_boost_changed" -> {
+                    bassBoostEnabled = intent.getBooleanExtra(VerlynSmartButtonService.EXTRA_ENABLED, bassBoostEnabled)
+                    preferences.edit().putBoolean("bass_boost_enabled", bassBoostEnabled).apply()
+                    audioEngine.setBassBoost(bassBoostEnabled)
+                }
+            }
+        }
+    }
+
+    private val runtimeStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                VerlynConnectionService.ACTION_STATE -> {
+                    val battery = intent.getIntExtra(VerlynConnectionService.EXTRA_BATTERY, -1)
+                    serviceBatteryPercent = battery.takeIf { it in 0..100 }
+                    rfcommState = intent.getStringExtra(VerlynConnectionService.EXTRA_LINK) ?: rfcommState
+                    serviceNoiseMode = intent.getStringExtra(VerlynConnectionService.EXTRA_NOISE_MODE) ?: serviceNoiseMode
+                    serviceNoiseReady = intent.getBooleanExtra(VerlynConnectionService.EXTRA_NOISE_READY, serviceNoiseReady)
+                    serviceNoiseModes = intent.getStringArrayListExtra(VerlynConnectionService.EXTRA_NOISE_MODES)?.toList() ?: serviceNoiseModes
+                    serviceNoiseStatus = intent.getStringExtra(VerlynConnectionService.EXTRA_NOISE_STATUS) ?: serviceNoiseStatus
+                }
+                VerlynConnectionService.ACTION_PACKET -> {
+                    val uuid = intent.getStringExtra(VerlynConnectionService.EXTRA_PACKET_UUID) ?: "RFCOMM"
+                    val length = intent.getIntExtra(VerlynConnectionService.EXTRA_PACKET_LENGTH, 0)
+                    val hex = intent.getStringExtra(VerlynConnectionService.EXTRA_PACKET_HEX) ?: ""
+                    val line = "UUID=" + uuid + " bytes=" + length + " HEX[" + hex + "]"
+                    rfcommCaptureLog.add(0, line)
+                    while (rfcommCaptureLog.size > 500) rfcommCaptureLog.removeAt(rfcommCaptureLog.lastIndex)
+                    appendLog("RFCOMM RX " + line)
+                }
+                VerlynAudioRuntime.ACTION_STATUS -> audioEffectStatus = intent.getStringExtra(VerlynAudioRuntime.EXTRA_STATUS) ?: audioEffectStatus
             }
         }
     }
@@ -488,7 +549,9 @@ class MainActivity : ComponentActivity() {
         scanner = adapter?.bluetoothLeScanner
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         loadAudioPreferences()
-        audioEngine = VerlynAudioEngine(this) { value -> runOnUiThread { audioEffectStatus = value } }
+        audioEngine = VerlynAudioRuntime.get(this)
+        audioEngine.setBassBoost(bassBoostEnabled)
+        audioEngine.setSpatial(spatialEnabled)
         voiceAnnouncer = VoiceAnnouncer(this)
         rfcommEngine = ClassicRfcommEngine(
             onStatus = { value -> runOnUiThread { rfcommState = value; appendLog("RFCOMM: " + value) } },
@@ -519,23 +582,23 @@ class MainActivity : ComponentActivity() {
         audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
         refreshVolume()
         registerBluetoothReceiver()
-        registerAudioEffectReceiver()
         registerSmartActionReceiver()
+        registerRuntimeStateReceiver()
         loadSmartPreferences()
         observeCustomPresets()
         requestProfileProxies()
 
         setContent {
-            VerlynProApp(
+            VerlynPremiumApp(
                 state = VerlynProUiState(
                     selectedTab = selectedTab,
-                    audioConnected = a2dpConnected || headsetConnected,
+                    audioConnected = a2dpConnected || headsetConnected || outputRoute.contains("JBL Tune 770NC", true),
                     a2dpConnected = a2dpConnected,
                     headsetConnected = headsetConnected,
                     bleState = bleState,
                     rfcommState = rfcommState,
-                    batteryPercent = headsetBatteryPercent ?: batteryLevel,
-                    batteryDetail = if (headsetBatteryPercent != null) headsetBatteryDetail else if (batteryLevel != null) "Standard BLE Battery Service · " + batteryLevel + "%" else "Unavailable · Fast Pair battery event not received",
+                    batteryPercent = headsetBatteryPercent ?: serviceBatteryPercent ?: batteryLevel,
+                    batteryDetail = if (headsetBatteryPercent != null) headsetBatteryDetail else if (serviceBatteryPercent != null) "Android Bluetooth battery metadata · " + serviceBatteryPercent + "%" else if (batteryLevel != null) "Standard BLE Battery Service · " + batteryLevel + "%" else "Unavailable",
                     route = outputRoute,
                     appStatus = appStatus,
                     scanning = scanning,
@@ -565,12 +628,19 @@ class MainActivity : ComponentActivity() {
                     balance = balance,
                     sessionCompatibility = sessionCompatibility,
                     triggerActions = smartTriggerActions.toMap(),
-                    accessibilityEnabled = accessibilityEnabled
+                    accessibilityEnabled = accessibilityEnabled,
+                    noiseMode = serviceNoiseMode,
+                    noiseControlReady = serviceNoiseReady,
+                    noiseSupportedModes = serviceNoiseModes,
+                    noiseStatus = serviceNoiseStatus,
+                    bassBoostEnabled = bassBoostEnabled,
+                    spatialEnabled = spatialEnabled,
+                    clarity = clarityValue
                 ),
                 actions = VerlynProUiActions(
                     onTabChange = { selectedTab = it },
-                    onConnectHeadset = { connectFastPairRfcomm() },
-                    onDisconnectHeadset = { rfcommEngine.disconnect() },
+                    onConnectHeadset = { startConnectionService(VerlynConnectionService.ACTION_FORCE_CONNECT) },
+                    onDisconnectHeadset = { startConnectionService(VerlynConnectionService.ACTION_STOP_LINK) },
                     onScan = { checkPermissionsAndScan() },
                     onBleConnect = { connectBleHeadset() },
                     onBleDisconnect = { disconnectGatt() },
@@ -583,13 +653,13 @@ class MainActivity : ComponentActivity() {
                         if (index in 0..9) {
                             eqGains[index] = value.coerceIn(-12f, 12f)
                             selectedPreset = "Custom"
-                            saveAudioPreferences()
-                            applyAudioSettings()
+                            mainHandler.removeCallbacks(audioApplyTask)
+                            mainHandler.postDelayed(audioApplyTask, 32L)
                         }
                     },
                     onEqEnabledChange = { eqEnabled = it; saveAudioPreferences(); applyAudioSettings() },
                     onPreset = { applyPreset(it) },
-                    onPreampChange = { preamp = it.coerceIn(-12f, 12f); selectedPreset = "Custom"; saveAudioPreferences(); applyAudioSettings() },
+                    onPreampChange = { preamp = it.coerceIn(-12f, 12f); selectedPreset = "Custom"; mainHandler.removeCallbacks(audioApplyTask); mainHandler.postDelayed(audioApplyTask, 32L) },
                     onSavePreset = { saveCustomPreset(it) },
                     onRenamePreset = { oldName, newName -> renameCustomPreset(oldName, newName) },
                     onDeletePreset = { deleteCustomPreset(it) },
@@ -600,7 +670,8 @@ class MainActivity : ComponentActivity() {
                     },
                     onBalanceChange = {
                         balance = it.coerceIn(-1f, 1f)
-                        preferences.edit().putFloat("balance", balance).apply()
+                        balanceEnabled = true
+                        preferences.edit().putFloat("balance", balance).putBoolean("balance_enabled", true).apply()
                         applyAudioSettings()
                     },
                     onLimiterChange = { updateLimiterEnabled(it) },
@@ -613,11 +684,33 @@ class MainActivity : ComponentActivity() {
                     onTestVoice = {
                         val time = SimpleDateFormat("h:mm a", Locale.US).format(Date())
                         voiceAnnouncer.speak("It is " + time + ". Verlyn voice output test.")
+                    },
+                    onNoiseModeChange = { VerlynConnectionService.requestNoiseMode(this@MainActivity, it) },
+                    onBassBoostChange = {
+                        bassBoostEnabled = it
+                        preferences.edit().putBoolean("bass_boost_enabled", it).apply()
+                        audioEngine.setBassBoost(it)
+                        sendBroadcast(Intent(VerlynConnectionService.ACTION_AUX_CHANGED).setPackage(packageName))
+                    },
+                    onSpatialChange = {
+                        spatialEnabled = it
+                        preferences.edit().putBoolean("spatial_enabled", it).apply()
+                        audioEngine.setSpatial(it)
+                        sendBroadcast(Intent(VerlynConnectionService.ACTION_AUX_CHANGED).setPackage(packageName))
+                    },
+                    onClarityChange = { value ->
+                        clarityValue = value.coerceIn(-6f, 6f)
+                        eqGains[8] = clarityValue
+                        eqGains[9] = clarityValue
+                        selectedPreset = "Custom"
+                        mainHandler.removeCallbacks(audioApplyTask)
+                        mainHandler.postDelayed(audioApplyTask, 32L)
                     }
                 )
             )
         }
         checkPermissionsAndScan()
+        if (hasBluetoothPermissions()) startConnectionService()
         mainHandler.post(routePoll)
     }
 
@@ -625,11 +718,34 @@ class MainActivity : ComponentActivity() {
         val filter = IntentFilter().apply {
             addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
             addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
             addAction(BluetoothDevice.ACTION_UUID)
+            addAction(BATTERY_ACTION)
             addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_EXPORTED)
         else registerReceiver(bluetoothStateReceiver, filter)
+    }
+
+    private fun registerRuntimeStateReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(VerlynConnectionService.ACTION_STATE)
+            addAction(VerlynConnectionService.ACTION_PACKET)
+            addAction(VerlynAudioRuntime.ACTION_STATUS)
+        }
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(runtimeStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else registerReceiver(runtimeStateReceiver, filter)
+    }
+
+    private fun startConnectionService(action: String? = null) {
+        if (!hasBluetoothPermissions()) return
+        val serviceIntent = Intent(this, VerlynConnectionService::class.java).apply { if (action != null) setAction(action) }
+        try {
+            if (Build.VERSION.SDK_INT >= 26) ContextCompat.startForegroundService(this, serviceIntent) else startService(serviceIntent)
+        } catch (error: Throwable) {
+            appStatus = "Bluetooth service unavailable: " + (error.message ?: "start failed")
+        }
     }
 
     private fun registerSmartActionReceiver() {
@@ -682,6 +798,7 @@ class MainActivity : ComponentActivity() {
                 if (isJblName(name) && name.contains("-LE", true) && targetDevice == null) targetDevice = device
                 if (isJblName(name) && !name.contains("-LE", true)) {
                     if (classicJblDevice == null || safeAddress(device).equals("88:92:CC:25:46:0E", true)) classicJblDevice = device
+                    readNativeHeadsetBattery(device)
                     val cachedUuids = try { device.uuids?.map { it.uuid }.orEmpty() } catch (_: Throwable) { emptyList() }
                     if (classicSdpUuids.isEmpty() && cachedUuids.isNotEmpty()) {
                         classicSdpUuids.addAll(cachedUuids.distinct().sortedBy { it.toString() })
@@ -766,6 +883,15 @@ class MainActivity : ComponentActivity() {
                 if (other == null) "No output route reported" else "Output: ${other.productName} (${audioTypeName(other.type)})"
             } else relevant.joinToString(" · ") { "${it.productName} (${audioTypeName(it.type)})" }
         } catch (_: Throwable) { outputRoute = "Output route unavailable on this Android build" }
+        val jblActive = outputRoute.contains("JBL Tune 770NC", true)
+        if (lastAppliedJblRoute != jblActive) {
+            lastAppliedJblRoute = jblActive
+            if (jblActive) restoreJblEqProfile()
+            if (::audioEngine.isInitialized) {
+                audioEngine.setRouteActive(jblActive)
+                applyAudioSettings()
+            }
+        }
     }
 
     private fun audioTypeName(type: Int): String = when (type) {
@@ -775,6 +901,12 @@ class MainActivity : ComponentActivity() {
         AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "Wired headphones"
         AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Wired headset"
         else -> "Output type $type"
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun readNativeHeadsetBattery(device: BluetoothDevice) {
+        val value = runCatching { device.javaClass.getMethod("getBatteryLevel").invoke(device) as? Int }.getOrNull()
+        if (value != null && value in 0..100) serviceBatteryPercent = value
     }
 
     private fun safeAddress(device: BluetoothDevice): String = try { device.address } catch (_: Throwable) { "Unavailable" }
@@ -1370,7 +1502,10 @@ class MainActivity : ComponentActivity() {
         eqEnabled = preferences.getBoolean("eq_enabled", true)
         limiterEnabled = preferences.getBoolean("limiter_enabled", true)
         selectedPreset = preferences.getString("preset", "Flat") ?: "Flat"
-        sessionCompatibility = preferences.getBoolean("session_compatibility", false)
+        sessionCompatibility = preferences.getBoolean("session_compatibility", true)
+        clarityValue = preferences.getFloat("clarity", 0f).coerceIn(-6f, 6f)
+        bassBoostEnabled = preferences.getBoolean("bass_boost_enabled", false)
+        spatialEnabled = preferences.getBoolean("spatial_enabled", false)
         balanceEnabled = preferences.getBoolean("balance_enabled", false)
         balance = preferences.getFloat("balance", 0f).coerceIn(-1f, 1f)
     }
@@ -1384,14 +1519,39 @@ class MainActivity : ComponentActivity() {
             .putString("preset", selectedPreset)
             .putBoolean("balance_enabled", balanceEnabled)
             .putFloat("balance", balance)
+            .putFloat("clarity", clarityValue)
+            .putBoolean("bass_boost_enabled", bassBoostEnabled)
+            .putBoolean("spatial_enabled", spatialEnabled)
             .apply()
+        if (lastAppliedJblRoute == true) {
+            preferences.edit()
+                .putString("jbl_eq_gains", eqGains.joinToString(","))
+                .putFloat("jbl_preamp", preamp)
+                .putString("jbl_preset", selectedPreset)
+                .apply()
+        }
+    }
+
+    private fun restoreJblEqProfile() {
+        val saved = preferences.getString("jbl_eq_gains", null) ?: return
+        val values = saved.split(",").mapNotNull { it.toFloatOrNull() }
+        if (values.size == 10) values.forEachIndexed { i, value -> eqGains[i] = value.coerceIn(-12f, 12f) }
+        preamp = preferences.getFloat("jbl_preamp", preamp).coerceIn(-12f, 12f)
+        selectedPreset = preferences.getString("jbl_preset", selectedPreset) ?: selectedPreset
     }
 
     private fun applyAudioSettings() {
-        if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
-        else audioEngine.apply(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
-        if (sessionCompatibility) compatibilitySessions.forEach {
-            audioEngine.attachSession(it, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
+        val gains = eqGains.toFloatArray()
+        val currentPreamp = preamp
+        val enabled = eqEnabled
+        val limited = limiterEnabled
+        val channelBalance = if (balanceEnabled) balance else 0f
+        lifecycleScope.launch(Dispatchers.Default) {
+            if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(gains, currentPreamp, enabled, limited, channelBalance)
+            else audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
+            if (sessionCompatibility) compatibilitySessions.forEach {
+                audioEngine.attachSession(it, gains, currentPreamp, enabled, limited, channelBalance)
+            }
         }
     }
 
@@ -1448,7 +1608,7 @@ class MainActivity : ComponentActivity() {
         refreshVolume(); refreshClassicState(); refreshOutputRoute()
         accessibilityEnabled = isSmartAccessibilityEnabled()
         if (adapter != null && hasBluetoothPermissions() && adapter?.isEnabled == true && !scanActive) {
-            loadPairedDevices(); startScan()
+            loadPairedDevices(); startScan(); startConnectionService()
         }
     }
 
@@ -1464,11 +1624,13 @@ class MainActivity : ComponentActivity() {
         try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Throwable) {}
         try { unregisterReceiver(audioEffectSessionReceiver) } catch (_: Throwable) {}
         try { unregisterReceiver(smartActionReceiver) } catch (_: Throwable) {}
+        try { unregisterReceiver(runtimeStateReceiver) } catch (_: Throwable) {}
+        mainHandler.removeCallbacks(audioApplyTask)
         try { rfcommEngine.shutdown() } catch (_: Throwable) {}
         try { voiceAnnouncer.shutdown() } catch (_: Throwable) {}
         try { a2dpProxy?.let { (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter?.closeProfileProxy(BluetoothProfile.A2DP, it) } } catch (_: Throwable) {}
         try { headsetProxy?.let { (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter?.closeProfileProxy(BluetoothProfile.HEADSET, it) } } catch (_: Throwable) {}
-        if (::audioEngine.isInitialized) audioEngine.releaseAll()
+        // The foreground connection service owns the shared audio engine lifetime.
         super.onDestroy()
     }
 }

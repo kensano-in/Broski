@@ -74,7 +74,14 @@ data class VerlynProUiState(
     val balance: Float,
     val sessionCompatibility: Boolean,
     val triggerActions: Map<String, String>,
-    val accessibilityEnabled: Boolean
+    val accessibilityEnabled: Boolean,
+    val noiseMode: String = "Unknown",
+    val noiseControlReady: Boolean = false,
+    val noiseSupportedModes: List<String> = emptyList(),
+    val noiseStatus: String = "",
+    val bassBoostEnabled: Boolean = false,
+    val spatialEnabled: Boolean = false,
+    val clarity: Float = 0f
 )
 
 data class VerlynProUiActions(
@@ -102,7 +109,11 @@ data class VerlynProUiActions(
     val onSessionCompatibilityChange: (Boolean) -> Unit,
     val onTriggerActionChange: (String, String) -> Unit,
     val onOpenAccessibilitySettings: () -> Unit,
-    val onTestVoice: () -> Unit
+    val onTestVoice: () -> Unit,
+    val onNoiseModeChange: (String) -> Unit = {},
+    val onBassBoostChange: (Boolean) -> Unit = {},
+    val onSpatialChange: (Boolean) -> Unit = {},
+    val onClarityChange: (Float) -> Unit = {}
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)

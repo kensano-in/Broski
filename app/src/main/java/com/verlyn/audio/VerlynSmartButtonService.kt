@@ -114,6 +114,13 @@ class VerlynSmartButtonService : AccessibilityService() {
                     .putExtra(EXTRA_ACTION, "limiter_changed").putExtra(EXTRA_ENABLED, enabled))
                 voice.speak(if (enabled) "Max volume limiter on" else "Max volume limiter off")
             }
+            "toggle_bass_boost" -> {
+                val enabled = !prefs.getBoolean("bass_boost_enabled", false)
+                prefs.edit().putBoolean("bass_boost_enabled", enabled).apply()
+                sendBroadcast(Intent(ACTION_SMART_ACTION).setPackage(packageName)
+                    .putExtra(EXTRA_ACTION, "bass_boost_changed").putExtra(EXTRA_ENABLED, enabled))
+                voice.speak(if (enabled) "Bass boost on" else "Bass boost off")
+            }
             "media_next" -> dispatchMedia(KeyEvent.KEYCODE_MEDIA_NEXT)
             "media_previous" -> dispatchMedia(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
             "media_play_pause" -> dispatchMedia(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)

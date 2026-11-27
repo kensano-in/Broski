@@ -2,6 +2,9 @@ package com.verlyn.audio
 
 import android.content.Context
 import android.media.audiofx.DynamicsProcessing
+import android.media.audiofx.BassBoost
+import android.media.audiofx.Virtualizer
+import android.media.audiofx.Equalizer
 import android.os.Build
 
 /** Native Android DynamicsProcessing wrapper for global and media-session audio effects. */
@@ -9,8 +12,13 @@ class VerlynAudioEngine(
     context: Context,
     private val onStatus: (String) -> Unit
 ) {
-    private val appContext = context.applicationContext
     private val effects = linkedMapOf<Int, DynamicsProcessing>()
+    private val bassEffects = linkedMapOf<Int, BassBoost>()
+    private val virtualizers = linkedMapOf<Int, Virtualizer>()
+    private val legacyEqualizers = linkedMapOf<Int, Equalizer>()
+    @Volatile private var bassBoostEnabled = false
+    @Volatile private var spatialEnabled = false
+    @Volatile private var routeActive = false
 
     companion object {
         val BAND_FREQUENCIES = floatArrayOf(
@@ -19,18 +27,18 @@ class VerlynAudioEngine(
         )
     }
 
-    fun attachGlobal(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
+    @Synchronized fun attachGlobal(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
         attach(0, gains, preamp, eqEnabled, limiterEnabled, balance)
     }
 
-    fun attachSession(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
+    @Synchronized fun attachSession(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
         if (sessionId <= 0) return
         attach(sessionId, gains, preamp, eqEnabled, limiterEnabled, balance)
     }
 
-    private fun attach(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float) {
+    @Synchronized private fun attach(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            onStatus("Bypassed — DynamicsProcessing requires Android 9 or newer")
+            if (!attachLegacy(sessionId, gains, eqEnabled)) onStatus("Bypassed — Android Equalizer unavailable")
             return
         }
         try {
@@ -56,17 +64,60 @@ class VerlynAudioEngine(
 
             val effect = DynamicsProcessing(0, sessionId, config)
             applyChannelBalance(effect, preamp, balance)
-            effect.enabled = true
+            effect.enabled = routeActive
             effects[sessionId] = effect
+            legacyEqualizers.remove(sessionId)?.release()
+            applyAuxEffects(sessionId)
             onStatus(statusForEffects())
         } catch (error: Throwable) {
-            onStatus("Bypassed — ${error.javaClass.simpleName}: ${error.message ?: "effect unavailable"}")
+            if (!attachLegacy(sessionId, gains, eqEnabled)) {
+                onStatus("Bypassed — ${error.javaClass.simpleName}: ${error.message ?: "effect unavailable"}")
+            }
         }
     }
 
-    fun apply(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
+    private fun attachLegacy(sessionId: Int, gains: FloatArray, enabled: Boolean): Boolean = try {
+        legacyEqualizers.remove(sessionId)?.release()
+        val equalizer = Equalizer(0, sessionId)
+        val count = equalizer.numberOfBands.toInt()
+        val range = equalizer.bandLevelRange
+        for (band in 0 until count) {
+            val frequencyHz = equalizer.getCenterFreq(band.toShort()) / 1000f
+            val nearest = BAND_FREQUENCIES.indices.minByOrNull { kotlin.math.abs(BAND_FREQUENCIES[it] - frequencyHz) } ?: 0
+            val level = (gains.getOrElse(nearest) { 0f } * 100f).toInt()
+                .coerceIn(range[0].toInt(), range[1].toInt()).toShort()
+            equalizer.setBandLevel(band.toShort(), level)
+        }
+        equalizer.enabled = enabled && routeActive
+        legacyEqualizers[sessionId] = equalizer
+        applyAuxEffects(sessionId)
+        onStatus(statusForEffects())
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+    private fun applyLegacyEffects(gains: FloatArray, enabled: Boolean) {
+        legacyEqualizers.toMap().forEach { (sessionId, equalizer) ->
+            try {
+                val count = equalizer.numberOfBands.toInt()
+                val range = equalizer.bandLevelRange
+                for (band in 0 until count) {
+                    val frequencyHz = equalizer.getCenterFreq(band.toShort()) / 1000f
+                    val nearest = BAND_FREQUENCIES.indices.minByOrNull { kotlin.math.abs(BAND_FREQUENCIES[it] - frequencyHz) } ?: 0
+                    val level = (gains.getOrElse(nearest) { 0f } * 100f).toInt()
+                        .coerceIn(range[0].toInt(), range[1].toInt()).toShort()
+                    equalizer.setBandLevel(band.toShort(), level)
+                }
+                equalizer.enabled = enabled && routeActive
+            } catch (_: Throwable) { legacyEqualizers.remove(sessionId)?.release() }
+        }
+    }
+
+    @Synchronized fun apply(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            onStatus("Bypassed — DynamicsProcessing requires Android 9 or newer")
+            applyLegacyEffects(gains, eqEnabled)
+            onStatus(statusForEffects())
             return
         }
         effects.toMap().forEach { (sessionId, effect) ->
@@ -80,11 +131,12 @@ class VerlynAudioEngine(
                 }
                 effect.setPostEqAllChannelsTo(eq)
                 effect.setLimiterAllChannelsTo(DynamicsProcessing.Limiter(true, limiterEnabled, 0, 10f, 100f, 20f, -1f, 0f))
-                effect.enabled = true
+                effect.enabled = routeActive
             } catch (error: Throwable) {
                 onStatus("Bypassed — session $sessionId: ${error.message ?: "update failed"}")
             }
         }
+        applyLegacyEffects(gains, eqEnabled)
         onStatus(statusForEffects())
     }
 
@@ -97,26 +149,72 @@ class VerlynAudioEngine(
         effect.setInputGainbyChannel(1, right)
     }
 
-    fun detachSession(sessionId: Int) {
-        if (sessionId == 0) return
-        try { effects.remove(sessionId)?.release() } catch (_: Throwable) {}
+    @Synchronized fun setRouteActive(active: Boolean) {
+        routeActive = active
+        effects.values.forEach { runCatching { it.enabled = active } }
+        legacyEqualizers.values.forEach { runCatching { it.enabled = active } }
+        bassEffects.values.forEach { runCatching { it.enabled = active && bassBoostEnabled } }
+        virtualizers.values.forEach { runCatching { it.enabled = active && spatialEnabled } }
         onStatus(statusForEffects())
     }
 
-    fun releaseAll() {
+    @Synchronized fun setBassBoost(enabled: Boolean) {
+        bassBoostEnabled = enabled
+        val targets = (effects.keys + legacyEqualizers.keys + bassEffects.keys).ifEmpty { setOf(0) }
+        targets.forEach { applyAuxEffects(it) }
+    }
+
+    @Synchronized fun setSpatial(enabled: Boolean) {
+        spatialEnabled = enabled
+        val targets = (effects.keys + legacyEqualizers.keys + virtualizers.keys).ifEmpty { setOf(0) }
+        targets.forEach { applyAuxEffects(it) }
+    }
+
+    private fun applyAuxEffects(sessionId: Int) {
+        try {
+            val bass = bassEffects.getOrPut(sessionId) { BassBoost(0, sessionId) }
+            bass.setStrength(650.toShort())
+            bass.enabled = bassBoostEnabled && routeActive
+        } catch (_: Throwable) { }
+        try {
+            val virtualizer = virtualizers.getOrPut(sessionId) { Virtualizer(0, sessionId) }
+            virtualizer.setStrength(500.toShort())
+            virtualizer.enabled = spatialEnabled && routeActive
+        } catch (_: Throwable) { }
+    }
+
+    @Synchronized fun detachSession(sessionId: Int) {
+        if (sessionId == 0) return
+        try { effects.remove(sessionId)?.release() } catch (_: Throwable) {}
+        try { legacyEqualizers.remove(sessionId)?.release() } catch (_: Throwable) {}
+        try { bassEffects.remove(sessionId)?.release() } catch (_: Throwable) {}
+        try { virtualizers.remove(sessionId)?.release() } catch (_: Throwable) {}
+        onStatus(statusForEffects())
+    }
+
+    @Synchronized fun releaseAll() {
         effects.values.forEach { try { it.release() } catch (_: Throwable) {} }
+        bassEffects.values.forEach { try { it.release() } catch (_: Throwable) {} }
+        virtualizers.values.forEach { try { it.release() } catch (_: Throwable) {} }
         effects.clear()
+        legacyEqualizers.values.forEach { try { it.release() } catch (_: Throwable) {} }
+        legacyEqualizers.clear()
+        bassEffects.clear()
+        virtualizers.clear()
         onStatus("Bypassed")
     }
 
-    fun hasGlobalMixEffect(): Boolean = effects.containsKey(0)
-    fun activeSessionCount(): Int = effects.keys.count { it != 0 }
+    @Synchronized fun hasGlobalMixEffect(): Boolean = effects.containsKey(0) || legacyEqualizers.containsKey(0)
+    @Synchronized fun activeSessionCount(): Int = (effects.keys + legacyEqualizers.keys).count { it != 0 }
 
     private fun statusForEffects(): String {
         val mediaSessions = activeSessionCount()
         val global = effects[0]
+        val legacyGlobal = legacyEqualizers[0]
         return when {
+            !routeActive && (global != null || legacyGlobal != null || mediaSessions > 0) -> "Bypassed · JBL output inactive"
             mediaSessions > 0 -> "Active on Media Session ($mediaSessions)"
+            legacyGlobal != null -> "Active on Android Equalizer"
             global != null -> try {
                 if (global.hasControl() && global.enabled) "Active on Global Mix"
                 else "Bypassed — global effect has no control"
@@ -125,5 +223,27 @@ class VerlynAudioEngine(
             }
             else -> "Bypassed"
         }
+    }
+}
+
+
+object VerlynAudioRuntime {
+    const val ACTION_STATUS = "com.verlyn.audio.AUDIO_EFFECT_STATUS"
+    const val EXTRA_STATUS = "status"
+    @Volatile private var instance: VerlynAudioEngine? = null
+
+    @Synchronized
+    fun get(context: Context): VerlynAudioEngine {
+        instance?.let { return it }
+        val app = context.applicationContext
+        return VerlynAudioEngine(app) { status ->
+            app.sendBroadcast(android.content.Intent(ACTION_STATUS).setPackage(app.packageName).putExtra(EXTRA_STATUS, status))
+        }.also { instance = it }
+    }
+
+    @Synchronized
+    fun release() {
+        instance?.releaseAll()
+        instance = null
     }
 }
