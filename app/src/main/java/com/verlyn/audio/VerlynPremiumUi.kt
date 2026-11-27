@@ -477,6 +477,83 @@ private fun SmartTab(s: VerlynProUiState, a: VerlynProUiActions, pick: (String) 
             Text("Vol + / Vol − selects the next or previous preset. Each change is previewed for four seconds; five seconds of inactivity locks the preset.", color = VMuted, fontSize = 10.sp)
             Text("Sleep timer cycles 15 · 30 · 45 · 60 minutes · Off.", color = VMuted, fontSize = 10.sp)
         }
+        PremiumCard {
+            Text("PER-APP AUTO EQ", color = VBlueLight, fontWeight = FontWeight.Bold)
+            Text("Select a profile for each media app. A rule is applied when Android reports that app's playback session.", color = VMuted, fontSize = 10.sp)
+            val customNames = s.customPresets.map { it.name }
+            AutoEqRuleRow("Spotify", "com.spotify.music", s.autoEqRules["com.spotify.music"] ?: "Off", customNames, a.onAutoEqRuleChange)
+            AutoEqRuleRow("YouTube", "com.google.android.youtube", s.autoEqRules["com.google.android.youtube"] ?: "Off", customNames, a.onAutoEqRuleChange)
+            AutoEqRuleRow("YouTube Music", "com.google.android.apps.youtube.music", s.autoEqRules["com.google.android.apps.youtube.music"] ?: "Off", customNames, a.onAutoEqRuleChange)
+            val knownPackages = setOf("com.spotify.music", "com.google.android.youtube", "com.google.android.apps.youtube.music")
+            s.autoEqRules.filterKeys { it !in knownPackages }.forEach { (packageName, preset) ->
+                AutoEqRuleRow(packageName, packageName, preset, customNames, a.onAutoEqRuleChange)
+            }
+            var customPackage by remember { mutableStateOf("") }
+            var customPreset by remember { mutableStateOf("Flat") }
+            OutlinedTextField(
+                value = customPackage,
+                onValueChange = { customPackage = it.trim() },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Custom app package") },
+                placeholder = { Text("com.example.player") }
+            )
+            AutoEqRuleRow(
+                "Custom app profile",
+                customPackage.ifBlank { "Enter a package above" },
+                customPreset,
+                customNames
+            ) { _, selected -> customPreset = selected }
+            Button(
+                onClick = {
+                    val packageName = customPackage.trim()
+                    if (packageName.contains(".")) {
+                        a.onAutoEqRuleChange(packageName, customPreset)
+                        customPackage = ""
+                    }
+                },
+                enabled = customPackage.contains("."),
+                colors = ButtonDefaults.buttonColors(containerColor = VBlue)
+            ) { Text("SAVE CUSTOM APP RULE") }
+        }
+    }
+}
+
+@Composable
+private fun AutoEqRuleRow(
+    title: String,
+    packageName: String,
+    current: String,
+    customNames: List<String>,
+    onChange: (String, String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val presetOptions = (
+        listOf("Off", "Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming") +
+            customNames
+        ).distinct()
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Text(packageName, color = VMuted, fontSize = 8.sp, maxLines = 1)
+        }
+        Box {
+            OutlinedButton(
+                onClick = { expanded = true },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+            ) { Text(current, fontSize = 10.sp) }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                presetOptions.forEach { preset ->
+                    DropdownMenuItem(
+                        text = { Text(preset) },
+                        onClick = {
+                            expanded = false
+                            onChange(packageName, preset)
+                        }
+                    )
+                }
+            }
+        }
     }
 }
 

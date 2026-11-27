@@ -153,7 +153,9 @@ data class VerlynProUiActions(
     val onMbcTuningChange: (String, Float) -> Unit = { _, _ -> },
     val onBassStrengthChange: (Float) -> Unit = {},
     val onSpatialStrengthChange: (Float) -> Unit = {},
-    val onFindHeadsetPing: () -> Unit = {}
+    val onFindHeadsetPing: () -> Unit = {},
+    val autoEqRules: Map<String, String> = emptyMap(),
+    val onAutoEqRuleChange: (String, String) -> Unit = { _, _ -> }
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)

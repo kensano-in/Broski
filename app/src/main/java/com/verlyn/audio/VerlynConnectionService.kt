@@ -259,7 +259,7 @@ class VerlynConnectionService : Service() {
         }
         val isOperationalAction = data?.action in setOf(
             ACTION_COMPANION_APPEARED, ACTION_COMMAND_ASSIST, ACTION_COMMAND_BRIEFING,
-            ACTION_COMMAND_NEXT_EQ, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
+            ACTION_COMMAND_NEXT_EQ, ACTION_AUTO_EQ_RULES_CHANGED, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
             ACTION_POWER_OFF_HEADSET, ACTION_MANUAL_RFCOMM_CONNECT,
             ACTION_MANUAL_RFCOMM_SEND
         )
@@ -328,6 +328,7 @@ class VerlynConnectionService : Service() {
                 runConfiguredCommand("command_center_long_hold", "speak_full_briefing")
             }
             ACTION_COMMAND_NEXT_EQ -> cyclePresetFromNotification()
+            ACTION_AUTO_EQ_RULES_CHANGED -> rebindActiveAudioSessions()
             ACTION_FIND_HEADSET_PING -> playFindHeadsetPing()
             ACTION_COMPANION_APPEARED -> {
                 appendRaceLog("Companion presence · JBL Tune 770NC detected")
@@ -1120,16 +1121,54 @@ class VerlynConnectionService : Service() {
         }
         activeAudioSessions[sessionId] = normalized
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        val gains = prefs.getString("eq_gains", null)?.split(",")?.mapNotNull { it.toFloatOrNull() }
-            ?.takeIf { it.size == 10 }?.toFloatArray() ?: FloatArray(10)
+        val assignedPreset = prefs.getString("auto_eq_rule:" + normalized, null)
+            ?.takeIf { it.isNotBlank() && it != "Off" }
+        val assignedProfile = assignedPreset?.let { resolvePresetProfile(prefs, it) }
+        val gains = assignedProfile?.first
+            ?: prefs.getString("eq_gains", null)?.split(",")?.mapNotNull { it.toFloatOrNull() }
+                ?.takeIf { it.size == 10 }?.toFloatArray() ?: FloatArray(10)
+        val preamp = assignedProfile?.second ?: prefs.getFloat("preamp", 0f)
         val balance = if (prefs.getBoolean("balance_enabled", false)) prefs.getFloat("balance", 0f) else 0f
         VerlynAudioRuntime.get(this).setEngineMode(prefs.getString("audio_engine_mode", "native") ?: "native")
         VerlynAudioRuntime.get(this).attachSession(
-            sessionId, normalized, gains, prefs.getFloat("preamp", 0f),
+            sessionId, normalized, gains, preamp,
             prefs.getBoolean("eq_enabled", true), prefs.getBoolean("limiter_enabled", true), balance
         )
-        appendRaceLog("AUDIO SESSION bound · " + appLabel(normalized) + " · id=" + sessionId + " · source=" + source)
+        appendRaceLog("AUDIO SESSION bound · " + appLabel(normalized) + " · id=" + sessionId + " · source=" + source +
+            (assignedPreset?.let { " · AUTO EQ=" + it } ?: ""))
         publishState()
+    }
+
+    private fun rebindActiveAudioSessions() {
+        val active = activeAudioSessions.toMap()
+        active.forEach { (sessionId, packageName) ->
+            VerlynAudioRuntime.get(this).detachSession(sessionId)
+            activeAudioSessions.remove(sessionId)
+            bindAudioSession(sessionId, packageName, "Auto-EQ rule changed")
+        }
+    }
+
+    private fun resolvePresetProfile(
+        prefs: android.content.SharedPreferences,
+        presetName: String
+    ): Pair<FloatArray, Float> {
+        val builtIns = setOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming")
+        if (presetName in builtIns) return headsetPreset(presetName)
+        prefs.getString("saved_preset_profiles", "").orEmpty().lineSequence().forEach { record ->
+            val parts = record.split(";", limit = 3)
+            if (parts.size == 3) {
+                val name = runCatching {
+                    String(android.util.Base64.decode(parts[0], android.util.Base64.NO_WRAP), Charsets.UTF_8)
+                }.getOrDefault("")
+                if (name == presetName) {
+                    val gains = parts[1].split(",").mapNotNull { it.toFloatOrNull() }
+                    val preamp = parts[2].toFloatOrNull() ?: 0f
+                    if (gains.size == 10) return gains.toFloatArray() to preamp
+                }
+            }
+        }
+        appendRaceLog("AUTO EQ · profile '$presetName' not found in saved cache; using Flat")
+        return headsetPreset("Flat")
     }
 
     private fun unbindAudioSession(sessionId: Int, source: String) {
@@ -1211,6 +1250,7 @@ class VerlynConnectionService : Service() {
         const val ACTION_COMMAND_ASSIST = "com.verlyn.audio.COMMAND_ASSIST"
         const val ACTION_COMMAND_BRIEFING = "com.verlyn.audio.COMMAND_BRIEFING"
         const val ACTION_COMMAND_NEXT_EQ = "com.verlyn.audio.COMMAND_NEXT_EQ"
+        const val ACTION_AUTO_EQ_RULES_CHANGED = "com.verlyn.audio.AUTO_EQ_RULES_CHANGED"
         const val ACTION_FIND_HEADSET_PING = "com.verlyn.audio.FIND_HEADSET_PING"
         const val ACTION_COMPANION_APPEARED = "com.verlyn.audio.COMPANION_APPEARED"
         const val ACTION_COMPANION_DISAPPEARED = "com.verlyn.audio.COMPANION_DISAPPEARED"

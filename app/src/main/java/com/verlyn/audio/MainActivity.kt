@@ -148,6 +148,7 @@ class MainActivity : ComponentActivity() {
     private val classicSdpUuids = mutableStateListOf<UUID>()
     private val rfcommCaptureLog = mutableStateListOf<String>()
     private val customPresets = mutableStateListOf<EqPreset>()
+    private val autoEqRules = mutableStateMapOf<String, String>()
     private val smartTriggerActions = mutableStateMapOf<String, String>()
     private lateinit var voiceAnnouncer: VoiceAnnouncer
     private lateinit var eqTestPlayer: EqTestAudioPlayer
@@ -629,6 +630,7 @@ class MainActivity : ComponentActivity() {
         scanner = adapter?.bluetoothLeScanner
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         loadAudioPreferences()
+        loadAutoEqRules()
         refreshQuickSetupStatus()
         audioEngine = VerlynAudioRuntime.get(this)
         audioEngine.setEngineMode(engineMode)
@@ -724,6 +726,7 @@ class MainActivity : ComponentActivity() {
                     companionConfigured = companionConfigured,
                     batteryUnrestricted = batteryUnrestricted,
                     assistantSelected = assistantSelected,
+                    autoEqRules = autoEqRules.toMap(),
                     nativeBandCentersHz = audioEngine.nativeBandCenterFrequenciesHz(),
                     audioBypassed = audioBypassed,
                     bassPunch = bassPunch,
@@ -811,6 +814,20 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onPowerOffHeadset = { VerlynConnectionService.requestPowerOff(this@MainActivity) },
+                    onAutoEqRuleChange = { packageName, preset ->
+                        val normalized = packageName.trim()
+                        if (normalized.contains(".")) {
+                            if (preset == "Off") {
+                                autoEqRules.remove(normalized)
+                                preferences.edit().remove("auto_eq_rule:" + normalized).apply()
+                            } else {
+                                autoEqRules[normalized] = preset
+                                preferences.edit().putString("auto_eq_rule:" + normalized, preset).apply()
+                            }
+                            appendLog("AUTO EQ RULE · " + normalized + " → " + preset)
+                            startConnectionService(VerlynConnectionService.ACTION_AUTO_EQ_RULES_CHANGED)
+                        }
+                    },
                     onFindHeadsetPing = {
                         val pingIntent = Intent(this@MainActivity, VerlynConnectionService::class.java)
                             .setAction(VerlynConnectionService.ACTION_FIND_HEADSET_PING)
@@ -1551,12 +1568,31 @@ class MainActivity : ComponentActivity() {
         }.onFailure { Toast.makeText(this, "Companion association failed · " + (it.message ?: "unsupported"), Toast.LENGTH_LONG).show() }
     }
 
+    private fun loadAutoEqRules() {
+        autoEqRules.clear()
+        preferences.all.forEach { (key, value) ->
+            if (key.startsWith("auto_eq_rule:") && value is String && value.isNotBlank()) {
+                autoEqRules[key.removePrefix("auto_eq_rule:")] = value
+            }
+        }
+    }
+
     private fun observeCustomPresets() {
         lifecycleScope.launch {
             EqPresetStore.observe(this@MainActivity).collect { latest ->
                 customPresets.clear()
                 customPresets.addAll(latest)
-                preferences.edit().putString("saved_preset_names", latest.joinToString("\n") { it.name }).apply()
+                val profiles = latest.joinToString("\n") { preset ->
+                    val encodedName = android.util.Base64.encodeToString(
+                        preset.name.toByteArray(Charsets.UTF_8),
+                        android.util.Base64.NO_WRAP
+                    )
+                    encodedName + ";" + preset.gains.joinToString(",") + ";" + preset.preamp
+                }
+                preferences.edit()
+                    .putString("saved_preset_names", latest.joinToString("\n") { it.name })
+                    .putString("saved_preset_profiles", profiles)
+                    .apply()
             }
         }
     }
