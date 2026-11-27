@@ -933,68 +933,6 @@ class VerlynConnectionService : Service() {
         )
     }
 
-    private fun runHeadsetAction(action: String) {
-        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        when (action) {
-            "speak_time" -> voiceAnnouncer.speak(
-                "It is " + java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date())
-            )
-            "speak_battery" -> {
-                val phone = (getSystemService(BATTERY_SERVICE) as BatteryManager)
-                    .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).coerceIn(0, 100)
-                val headset = prefs.getInt("headset_battery_percent", -1)
-                voiceAnnouncer.speak(
-                    if (headset in 0..100) {
-                        "Phone battery is " + phone + " percent. Headset battery is " + headset + " percent."
-                    } else {
-                        "Phone battery is " + phone + " percent. Headset battery is unavailable."
-                    }
-                )
-            }
-            "cycle_eq" -> {
-                val custom = (prefs.getString("saved_preset_names", "") ?: "").split("\n").filter { it.isNotBlank() }
-                val names = (listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming") + custom).distinct()
-                val current = prefs.getString("preset", "Flat") ?: "Flat"
-                val next = names[(names.indexOf(current).coerceAtLeast(-1) + 1) % names.size]
-                val preset = resolvePresetProfile(prefs, next)
-                prefs.edit()
-                    .putString("preset", next)
-                    .putString("eq_gains", preset.first.joinToString(","))
-                    .putFloat("preamp", preset.second)
-                    .apply()
-                reapplyAudioSettings()
-                sendHeadsetSmartAction("apply_preset", next)
-                voiceAnnouncer.speak(next + " EQ active")
-            }
-            "toggle_limiter" -> {
-                val enabled = !prefs.getBoolean("limiter_enabled", true)
-                prefs.edit().putBoolean("limiter_enabled", enabled).apply()
-                reapplyAudioSettings()
-                sendHeadsetSmartAction("limiter_changed", enabled = enabled)
-                voiceAnnouncer.speak(if (enabled) "Peak limiter on" else "Peak limiter off")
-            }
-            "toggle_bass_boost" -> {
-                val enabled = !prefs.getBoolean("bass_boost_enabled", false)
-                prefs.edit().putBoolean("bass_boost_enabled", enabled).apply()
-                VerlynAudioRuntime.get(this).setBassBoost(enabled)
-                sendHeadsetSmartAction("bass_boost_changed", enabled = enabled)
-                voiceAnnouncer.speak(if (enabled) "Bass boost on" else "Bass boost off")
-            }
-            "media_next" -> dispatchMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_NEXT)
-            "media_previous" -> dispatchMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS)
-            "media_play_pause" -> dispatchMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
-            "disabled" -> sendSmartLog("Headset gesture ignored · action disabled")
-        }
-    }
-
-    private fun sendHeadsetSmartAction(action: String, value: String? = null, enabled: Boolean? = null) {
-        val intent = Intent(VerlynSmartButtonService.ACTION_SMART_ACTION).setPackage(packageName)
-            .putExtra(VerlynSmartButtonService.EXTRA_ACTION, action)
-        if (value != null) intent.putExtra(VerlynSmartButtonService.EXTRA_VALUE, value)
-        if (enabled != null) intent.putExtra(VerlynSmartButtonService.EXTRA_ENABLED, enabled)
-        sendBroadcast(intent)
-    }
-
     private fun playFindHeadsetPing() {
         if (!isJblA2dpRouteActive()) {
             appendRaceLog("FIND HEADSET · ping skipped because JBL A2DP is not connected")
