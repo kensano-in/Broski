@@ -17,7 +17,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** Serialized media-routed speech with exclusive focus and an explicit pause/resume fallback. */
 class VoiceAnnouncer(
     context: Context,
-    private val onStatus: (String) -> Unit = {}
+    private val onStatus: (String) -> Unit = {},
+    private val onUtteranceFinished: () -> Unit = {}
 ) : TextToSpeech.OnInitListener {
     private val appContext = context.applicationContext
     private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -189,6 +190,7 @@ class VoiceAnnouncer(
                 val queued = pendingText
                 pendingText = null
                 if (queued != null) beginWithExclusiveFocus(queued)
+                else onUtteranceFinished()
             }, 250L)
         }
     }

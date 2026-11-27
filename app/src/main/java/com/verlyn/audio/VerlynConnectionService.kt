@@ -29,10 +29,10 @@ import android.os.Looper
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import java.util.ArrayDeque
 import java.util.ArrayList
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import android.view.KeyEvent
 
 class VerlynConnectionService : Service() {
     private val main = Handler(Looper.getMainLooper())
@@ -53,9 +53,19 @@ class VerlynConnectionService : Service() {
     private val stopped = AtomicBoolean(false)
     private var lastBluetoothBatteryAt = 0L
     private var headsetVolumeReceiverRegistered = false
-    private val headsetVolumeSteps = ArrayDeque<HeadsetVolumeStep>()
-    private var headsetGestureStartVolume = -1
-    private data class HeadsetVolumeStep(val direction: Int, val at: Long)
+    private enum class CommandMode { IDLE, COMMAND_WINDOW, EQ_SCROLL_MODE }
+    private var commandMode = CommandMode.IDLE
+    private var savedCommandVolume = -1
+    private var commandSpeechPending = false
+    private var commandEqPreviewPending = false
+    private var pendingCommandDirection = 0
+    private var pendingCommandTap: Runnable? = null
+    private var previewPauseTask: Runnable? = null
+    private var sleepTimerEndsAt = 0L
+    private var sleepTimerStartVolume = 0
+    private var sleepTimerTask: Runnable? = null
+    private val commandTapWindowMs = 380L
+    private val commandWindowTimeout = Runnable { onCommandWindowTimeout() }
     private var a2dpProxy: BluetoothA2dp? = null
     private var headsetProxy: BluetoothHeadset? = null
     private val activeAudioSessions = LinkedHashMap<Int, String>()
@@ -176,10 +186,10 @@ class VerlynConnectionService : Service() {
             appendRaceLog(line)
             publishState()
         } }
-        voiceAnnouncer = VoiceAnnouncer(this) { line -> main.post {
+        voiceAnnouncer = VoiceAnnouncer(this, { line -> main.post {
             appendRaceLog("HEADSET TTS · " + line)
             sendSmartLog(line)
-        } }
+        } }, { main.post { onCommandSpeechFinished() } })
         rfcomm = ClassicRfcommEngine(
             onStatus = { value -> main.post {
                 linkStatus = value
@@ -233,8 +243,26 @@ class VerlynConnectionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForegroundCompat()
         val data = intent
+        if (data?.action == ACTION_COMPANION_DISAPPEARED) {
+            closeCommandMode("JBL disconnected")
+            VerlynAudioRuntime.get(this).releaseAll()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        val isOperationalAction = data?.action in setOf(
+            ACTION_COMPANION_APPEARED, ACTION_COMMAND_ASSIST, ACTION_COMMAND_BRIEFING,
+            ACTION_COMMAND_NEXT_EQ, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
+            ACTION_POWER_OFF_HEADSET, ACTION_MANUAL_RFCOMM_CONNECT,
+            ACTION_MANUAL_RFCOMM_SEND
+        )
+        if (!isJblA2dpRouteActive() && !isOperationalAction) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        startForegroundCompat()
         when (data?.action) {
             ACTION_FORCE_CONNECT -> {
                 ensureTarget()?.let { connectFastPair(it) }
@@ -284,6 +312,19 @@ class VerlynConnectionService : Service() {
             }
             ACTION_AUDIO_SESSION_EVENT -> data?.let { handleAudioSessionIntent(it) }
             ACTION_AUDIO_SETTINGS_CHANGED -> reapplyAudioSettings()
+            ACTION_COMMAND_ASSIST -> handleAssistantCommand()
+            ACTION_COMMAND_BRIEFING -> {
+                if (commandMode == CommandMode.IDLE) enterCommandWindow()
+                runConfiguredCommand("command_center_long_hold", "speak_full_briefing")
+            }
+            ACTION_COMMAND_NEXT_EQ -> cyclePresetFromNotification()
+            ACTION_COMPANION_APPEARED -> {
+                appendRaceLog("Companion presence · JBL Tune 770NC detected")
+                ensureTarget()?.let { handleConnected(it) }
+                restoreJblProfile()
+                reapplyAudioSettings()
+                syncPlaybackSessions(runCatching { audioManager.activePlaybackConfigurations }.getOrDefault(emptyList()))
+            }
             else -> {
                 // Service startup observes Bluetooth state only; Classic RFCOMM is user-triggered.
                 syncHeadsetVolumeReceiver()
@@ -304,11 +345,15 @@ class VerlynConnectionService : Service() {
         lastJblRouteState = routeActive
         VerlynAudioRuntime.get(this).setRouteActive(routeActive)
         readNativeBattery(connectedDevice)
+        restoreJblProfile()
+        reapplyAudioSettings()
+        syncPlaybackSessions(runCatching { audioManager.activePlaybackConfigurations }.getOrDefault(emptyList()))
         syncHeadsetVolumeReceiver()
         publishState()
     }
 
     private fun handleDisconnected() {
+        closeCommandMode("headset disconnected")
         rfcomm.disconnect()
         race.cancelActive()
         syncHeadsetVolumeReceiver()
@@ -318,8 +363,11 @@ class VerlynConnectionService : Service() {
         noiseDetail = "Headset disconnected"
         lastJblRouteState = false
         VerlynAudioRuntime.get(this).setRouteActive(false)
+        VerlynAudioRuntime.get(this).releaseAll()
         linkStatus = "Headset disconnected"
         publishState()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun hasLiveBluetoothBatteryBroadcast(): Boolean =
@@ -455,6 +503,15 @@ class VerlynConnectionService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .addAction(R.drawable.ic_stat_verlyn, "Briefing", PendingIntent.getService(this, 771,
+                Intent(this, VerlynConnectionService::class.java).setAction(ACTION_COMMAND_BRIEFING),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .addAction(R.drawable.ic_stat_verlyn, "Next EQ", PendingIntent.getService(this, 772,
+                Intent(this, VerlynConnectionService::class.java).setAction(ACTION_COMMAND_NEXT_EQ),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .addAction(R.drawable.ic_stat_verlyn, "Stop", PendingIntent.getService(this, 773,
+                Intent(this, VerlynConnectionService::class.java).setAction(ACTION_COMPANION_DISAPPEARED),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .build()
 
     private fun startForegroundCompat() {
@@ -504,78 +561,308 @@ class VerlynConnectionService : Service() {
         }
     }.getOrDefault(false)
 
+    /** Normal mode never subscribes to system volume broadcasts. */
     private fun syncHeadsetVolumeReceiver() {
-        val enabled = getSharedPreferences(PREFS, MODE_PRIVATE)
-            .getBoolean("headset_earcup_gestures_enabled", false)
-        val shouldRegister = enabled && isJblA2dpRouteActive()
+        val shouldRegister = commandMode != CommandMode.IDLE && isJblA2dpRouteActive()
         if (shouldRegister && !headsetVolumeReceiverRegistered) {
             runCatching {
                 ContextCompat.registerReceiver(
-                    this,
-                    headsetVolumeReceiver,
-                    IntentFilter(VOLUME_CHANGED_ACTION),
+                    this, headsetVolumeReceiver, IntentFilter(VOLUME_CHANGED_ACTION),
                     ContextCompat.RECEIVER_EXPORTED
                 )
                 headsetVolumeReceiverRegistered = true
-                sendSmartLog("Headset Earcup Gestures active · JBL A2DP connected")
+                sendSmartLog("Command Mode · headset volume keys armed")
             }.onFailure {
-                appendRaceLog("Headset volume receiver registration failed · " + (it.message ?: "unknown"))
+                appendRaceLog("Command volume receiver registration failed · " + (it.message ?: "unknown"))
             }
         } else if (!shouldRegister && headsetVolumeReceiverRegistered) {
             runCatching { unregisterReceiver(headsetVolumeReceiver) }
             headsetVolumeReceiverRegistered = false
-            headsetVolumeSteps.clear()
-            headsetGestureStartVolume = -1
-            sendSmartLog(if (enabled) "Headset Earcup Gestures waiting for JBL A2DP" else "Headset Earcup Gestures disabled")
         }
     }
 
     private fun handleHeadsetVolumeChanged(intent: Intent) {
-        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        if (!prefs.getBoolean("headset_earcup_gestures_enabled", false)) return
+        if (commandMode == CommandMode.IDLE) return
         if (intent.getIntExtra(EXTRA_VOLUME_STREAM_TYPE, -1) != AudioManager.STREAM_MUSIC) return
         val now = SystemClock.elapsedRealtime()
-        if (VerlynVolumeChangeGuard.shouldIgnore(now)) {
-            appendRaceLog("Headset gesture ignored · VERLYN self-volume guard")
-            return
-        }
+        if (VerlynVolumeChangeGuard.shouldIgnore(now)) return
         val current = intent.getIntExtra(EXTRA_VOLUME_STREAM_VALUE, -1)
         val previous = intent.getIntExtra(EXTRA_PREV_VOLUME_STREAM_VALUE, -1)
         if (current < 0 || previous < 0 || current == previous) return
-        val direction = if (current < previous) -1 else 1
-        while (headsetVolumeSteps.isNotEmpty() && now - headsetVolumeSteps.first().at > HEADSET_GESTURE_WINDOW_MS) {
-            headsetVolumeSteps.removeFirst()
+        val direction = if (current > previous) 1 else -1
+        restoreCommandVolume()
+        appendRaceLog("COMMAND INPUT · " + if (direction > 0) "VOL+" else "VOL-")
+        if (commandMode == CommandMode.EQ_SCROLL_MODE) {
+            previewPauseTask?.let { main.removeCallbacks(it) }
+            moveEqPreset(direction)
+            return
         }
-        if (headsetVolumeSteps.isEmpty()) headsetGestureStartVolume = previous
-        headsetVolumeSteps.addLast(HeadsetVolumeStep(direction, now))
-        val steps = headsetVolumeSteps.toList()
-        val matchedKey = when {
-            steps.size >= 3 && steps.takeLast(3).all { it.direction == -1 } -> HEADSET_DOWN_THREE
-            steps.size >= 3 && steps.takeLast(3).all { it.direction == 1 } -> HEADSET_UP_THREE
-            steps.size >= 2 && steps.takeLast(2).first().direction == -1 && steps.last().direction == 1 -> HEADSET_DOWN_UP
-            else -> null
-        } ?: return
-        val restoreVolume = headsetGestureStartVolume
-        headsetVolumeSteps.clear()
-        headsetGestureStartVolume = -1
-        if (restoreVolume >= 0) {
+        pendingCommandTap?.let { main.removeCallbacks(it) }
+        if (pendingCommandDirection == direction) {
+            pendingCommandTap = null
+            pendingCommandDirection = 0
+            runConfiguredCommand(
+                if (direction > 0) "command_vol_up_double" else "command_vol_down_double",
+                if (direction > 0) "toggle_bass_boost" else "cycle_sleep_timer"
+            )
+        } else {
+            pendingCommandTap?.run()
+            pendingCommandDirection = direction
+            val task = Runnable {
+                pendingCommandTap = null
+                pendingCommandDirection = 0
+                runConfiguredCommand(
+                    if (direction > 0) "command_vol_up_single" else "command_vol_down_single",
+                    if (direction > 0) "speak_battery" else "enter_eq_scroll"
+                )
+            }
+            pendingCommandTap = task
+            main.postDelayed(task, commandTapWindowMs)
+        }
+    }
+
+    private fun restoreCommandVolume() {
+        if (savedCommandVolume < 0) return
+        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val restored = savedCommandVolume.coerceIn(0, maxVolume)
+        if (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) != restored) {
             VerlynVolumeChangeGuard.markProgrammaticChange()
-            val maximum = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            runCatching {
-                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, restoreVolume.coerceIn(0, maximum), 0)
-            }.onFailure {
-                appendRaceLog("Headset volume restore failed · " + (it.message ?: "unknown"))
+            runCatching { audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, restored, 0) }
+                .onFailure { appendRaceLog("Command volume lock failed · " + (it.message ?: "unknown")) }
+        }
+    }
+
+    private fun handleAssistantCommand() {
+        when (commandMode) {
+            CommandMode.IDLE -> enterCommandWindow()
+            CommandMode.COMMAND_WINDOW -> runConfiguredCommand("command_center_long_hold", "speak_full_briefing")
+            CommandMode.EQ_SCROLL_MODE -> lockEqScrollMode()
+        }
+    }
+
+    private fun enterCommandWindow() {
+        savedCommandVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        commandMode = CommandMode.COMMAND_WINDOW
+        syncHeadsetVolumeReceiver()
+        appendRaceLog("COMMAND MODE · IDLE → COMMAND_WINDOW · savedVolume=$savedCommandVolume")
+        val time = java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date())
+        speakCommand("It is $time")
+    }
+
+    private fun runConfiguredCommand(slot: String, defaultAction: String) {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val action = prefs.getString(slot, defaultAction) ?: defaultAction
+        appendRaceLog("COMMAND ACTION · $slot → $action")
+        when (action) {
+            "speak_battery" -> {
+                val phone = (getSystemService(BATTERY_SERVICE) as BatteryManager)
+                    .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).coerceIn(0, 100)
+                val headset = prefs.getInt("headset_battery_percent", battery ?: -1)
+                speakCommand(if (headset in 0..100) "Phone $phone percent, Headset $headset percent" else "Phone $phone percent, Headset battery unavailable")
+            }
+            "enter_eq_scroll" -> {
+                commandMode = CommandMode.EQ_SCROLL_MODE
+                appendRaceLog("COMMAND MODE · COMMAND_WINDOW → EQ_SCROLL_MODE")
+                speakCommand("EQ Mode")
+            }
+            "toggle_bass_boost" -> {
+                val enabled = !prefs.getBoolean("bass_boost_enabled", false)
+                prefs.edit().putBoolean("bass_boost_enabled", enabled).apply()
+                VerlynAudioRuntime.get(this).setBassBoost(enabled)
+                speakCommand(if (enabled) "Bass boost on" else "Bass boost off")
+            }
+            "cycle_sleep_timer" -> cycleSleepTimer()
+            "toggle_spatial" -> {
+                val enabled = !prefs.getBoolean("spatial_enabled", false)
+                prefs.edit().putBoolean("spatial_enabled", enabled).apply()
+                VerlynAudioRuntime.get(this).setSpatial(enabled)
+                speakCommand(if (enabled) "Spatial audio on" else "Spatial audio off")
+            }
+            "toggle_volume_cap" -> {
+                val enabled = !prefs.getBoolean("limiter_enabled", true)
+                prefs.edit().putBoolean("limiter_enabled", enabled).apply()
+                reapplyAudioSettings()
+                speakCommand(if (enabled) "Volume cap on" else "Volume cap off")
+            }
+            "speak_full_briefing" -> {
+                val phone = (getSystemService(BATTERY_SERVICE) as BatteryManager)
+                    .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).coerceIn(0, 100)
+                val headset = prefs.getInt("headset_battery_percent", battery ?: -1)
+                val time = java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date())
+                val headsetValue = if (headset in 0..100) "$headset percent" else "unavailable"
+                val preset = prefs.getString("preset", "Flat") ?: "Flat"
+                speakCommand("It is $time. Phone battery $phone percent. Headset battery $headsetValue. Equalizer preset $preset.")
+            }
+            "disabled" -> resetCommandTimeout()
+            else -> {
+                appendRaceLog("COMMAND ACTION · unsupported action ignored: $action")
+                resetCommandTimeout()
             }
         }
-        val action = prefs.getString(matchedKey, defaultHeadsetAction(matchedKey)) ?: "disabled"
-        val gestureName = when (matchedKey) {
-            HEADSET_DOWN_THREE -> "3× Volume Down"
-            HEADSET_UP_THREE -> "3× Volume Up"
-            else -> "Volume Down → Volume Up"
+    }
+
+    private fun speakCommand(message: String) {
+        commandSpeechPending = true
+        main.removeCallbacks(commandWindowTimeout)
+        if (!voiceAnnouncer.speak(message)) {
+            commandSpeechPending = false
+            resetCommandTimeout()
         }
-        sendSmartLog("Headset gesture · " + gestureName + " · action=" + action)
-        appendRaceLog("HEADSET GESTURE · " + gestureName + " · restored STREAM_MUSIC=" + restoreVolume)
-        runHeadsetAction(action)
+    }
+
+    private fun onCommandSpeechFinished() {
+        if (!commandSpeechPending) return
+        commandSpeechPending = false
+        if (commandMode == CommandMode.IDLE) return
+        if (commandMode == CommandMode.EQ_SCROLL_MODE && commandEqPreviewPending) {
+            commandEqPreviewPending = false
+            previewPauseTask?.let { main.removeCallbacks(it) }
+            val task = Runnable {
+                if (commandMode == CommandMode.EQ_SCROLL_MODE) {
+                    dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE)
+                    appendRaceLog("EQ SCROLL · 4-second live preview complete")
+                }
+            }
+            previewPauseTask = task
+            main.postDelayed(task, 4_000L)
+        }
+        resetCommandTimeout()
+    }
+
+    private fun resetCommandTimeout() {
+        main.removeCallbacks(commandWindowTimeout)
+        if (commandMode != CommandMode.IDLE) main.postDelayed(commandWindowTimeout, 5_000L)
+    }
+
+    private fun onCommandWindowTimeout() {
+        if (commandMode == CommandMode.EQ_SCROLL_MODE) {
+            lockEqScrollMode()
+        } else {
+            closeCommandMode("five-second inactivity timeout")
+        }
+    }
+
+    private fun closeCommandMode(reason: String) {
+        main.removeCallbacks(commandWindowTimeout)
+        pendingCommandTap?.let { main.removeCallbacks(it) }
+        pendingCommandTap = null
+        pendingCommandDirection = 0
+        previewPauseTask?.let { main.removeCallbacks(it) }
+        previewPauseTask = null
+        commandSpeechPending = false
+        commandEqPreviewPending = false
+        val previous = commandMode
+        commandMode = CommandMode.IDLE
+        restoreCommandVolume()
+        savedCommandVolume = -1
+        syncHeadsetVolumeReceiver()
+        if (previous != CommandMode.IDLE) appendRaceLog("COMMAND MODE · $previous → IDLE · $reason")
+    }
+
+    private fun lockEqScrollMode() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val preset = prefs.getString("preset", "Flat") ?: "Flat"
+        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
+        closeCommandMode("EQ preset locked")
+        voiceAnnouncer.speak("$preset locked")
+    }
+
+    private fun moveEqPreset(direction: Int) {
+        if (commandMode != CommandMode.EQ_SCROLL_MODE) return
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val custom = (prefs.getString("saved_preset_names", "") ?: "").split("\n").filter { it.isNotBlank() }
+        val names = (listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming") + custom).distinct()
+        val current = prefs.getString("preset", "Flat") ?: "Flat"
+        val index = names.indexOf(current).let { if (it < 0) 0 else it }
+        val next = names[(index + direction + names.size) % names.size]
+        val selected = headsetPreset(next)
+        prefs.edit().putString("preset", next).putString("eq_gains", selected.first.joinToString(","))
+            .putFloat("preamp", selected.second).apply()
+        reapplyAudioSettings()
+        commandEqPreviewPending = true
+        speakCommand(next)
+        appendRaceLog("EQ SCROLL · $current → $next · live preview requested")
+    }
+
+    private fun cyclePresetFromNotification() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val custom = (prefs.getString("saved_preset_names", "") ?: "").split("\n").filter { it.isNotBlank() }
+        val names = (listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming") + custom).distinct()
+        val current = prefs.getString("preset", "Flat") ?: "Flat"
+        val index = names.indexOf(current).let { if (it < 0) 0 else it }
+        val next = names[(index + 1) % names.size]
+        val selected = headsetPreset(next)
+        prefs.edit().putString("preset", next).putString("eq_gains", selected.first.joinToString(","))
+            .putFloat("preamp", selected.second).apply()
+        reapplyAudioSettings()
+        sendSmartLog("Next EQ · $next")
+    }
+
+    private fun restoreJblProfile() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val saved = prefs.getString("jbl_eq_gains", null) ?: return
+        val gains = saved.split(",").mapNotNull { it.toFloatOrNull() }
+        if (gains.size == 10) prefs.edit()
+            .putString("eq_gains", saved)
+            .putFloat("preamp", prefs.getFloat("jbl_preamp", 0f))
+            .putString("preset", prefs.getString("jbl_preset", "Flat"))
+            .apply()
+    }
+
+    private fun cycleSleepTimer() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val steps = listOf(15, 30, 45, 60, 0)
+        val current = prefs.getInt("sleep_timer_minutes", 0)
+        val next = steps[(steps.indexOf(current).coerceAtLeast(-1) + 1) % steps.size]
+        prefs.edit().putInt("sleep_timer_minutes", next).apply()
+        setSleepTimer(next)
+        speakCommand(if (next == 0) "Sleep timer off" else "Sleep timer $next minutes")
+    }
+
+    private fun setSleepTimer(minutes: Int) {
+        sleepTimerTask?.let { main.removeCallbacks(it) }
+        sleepTimerTask = null
+        sleepTimerEndsAt = 0L
+        if (minutes <= 0) {
+            if (sleepTimerStartVolume > 0) setCommandVolume(sleepTimerStartVolume)
+            return
+        }
+        sleepTimerStartVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        sleepTimerEndsAt = SystemClock.elapsedRealtime() + minutes * 60_000L
+        val task = object : Runnable {
+            override fun run() {
+                val remaining = sleepTimerEndsAt - SystemClock.elapsedRealtime()
+                if (remaining > 10_000L) {
+                    main.postDelayed(this, remaining - 10_000L)
+                } else if (remaining > 0L) {
+                    val elapsed = ((10_000L - remaining) / 1_000L).toInt().coerceIn(0, 10)
+                    setCommandVolume((sleepTimerStartVolume * (10 - elapsed) / 10f).toInt())
+                    main.postDelayed(this, 1_000L)
+                } else {
+                    dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE)
+                    main.postDelayed({
+                        setCommandVolume(sleepTimerStartVolume)
+                        sleepTimerEndsAt = 0L
+                        sleepTimerTask = null
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("sleep_timer_minutes", 0).apply()
+                        sendSmartLog("Sleep timer completed · playback paused and volume restored")
+                    }, 350L)
+                }
+            }
+        }
+        sleepTimerTask = task
+        main.postDelayed(task, maxOf(1L, sleepTimerEndsAt - SystemClock.elapsedRealtime() - 10_000L))
+    }
+
+    private fun setCommandVolume(value: Int) {
+        VerlynVolumeChangeGuard.markProgrammaticChange()
+        runCatching {
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                value.coerceIn(0, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)),
+                0
+            )
+        }.onFailure { appendRaceLog("Sleep timer volume update failed · " + (it.message ?: "unknown")) }
     }
 
     private fun sendSmartLog(message: String) {
@@ -811,6 +1098,7 @@ class VerlynConnectionService : Service() {
     override fun onDestroy() {
         stopped.set(true)
         main.removeCallbacksAndMessages(null)
+        sleepTimerTask?.let { main.removeCallbacks(it) }
         runCatching { unregisterReceiver(bluetoothReceiver) }
         runCatching { unregisterReceiver(audioSessionReceiver) }
         runCatching { unregisterReceiver(auxiliaryReceiver) }
@@ -828,6 +1116,11 @@ class VerlynConnectionService : Service() {
 
     companion object {
         const val ACTION_STATE = "com.verlyn.audio.CONNECTION_STATE"
+        const val ACTION_COMMAND_ASSIST = "com.verlyn.audio.COMMAND_ASSIST"
+        const val ACTION_COMMAND_BRIEFING = "com.verlyn.audio.COMMAND_BRIEFING"
+        const val ACTION_COMMAND_NEXT_EQ = "com.verlyn.audio.COMMAND_NEXT_EQ"
+        const val ACTION_COMPANION_APPEARED = "com.verlyn.audio.COMPANION_APPEARED"
+        const val ACTION_COMPANION_DISAPPEARED = "com.verlyn.audio.COMPANION_DISAPPEARED"
         const val ACTION_PACKET = "com.verlyn.audio.RFCOMM_PACKET"
         const val ACTION_RACE_LOG = "com.verlyn.audio.RACE_LOG"
         const val ACTION_FORCE_CONNECT = "com.verlyn.audio.FORCE_CONNECT"
@@ -869,10 +1162,6 @@ class VerlynConnectionService : Service() {
         private const val EXTRA_VOLUME_STREAM_VALUE = "android.media.EXTRA_VOLUME_STREAM_VALUE"
         private const val EXTRA_PREV_VOLUME_STREAM_VALUE = "android.media.EXTRA_PREV_VOLUME_STREAM_VALUE"
         private const val BATTERY_BROADCAST_FRESH_MS = 10 * 60 * 1000L
-        private const val HEADSET_GESTURE_WINDOW_MS = 1_100L
-        const val HEADSET_DOWN_THREE = "headset_volume_down_3"
-        const val HEADSET_UP_THREE = "headset_volume_up_3"
-        const val HEADSET_DOWN_UP = "headset_volume_down_up"
         private const val PREFERRED_JBL_ADDRESS = "88:92:CC:25:46:0E"
         private const val MAX_RACE_LOG_LINES = 400
         private val ALL_NOISE_MODES = listOf("ANC", "Ambient Aware", "TalkThru", "Off")
