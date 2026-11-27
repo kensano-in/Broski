@@ -250,7 +250,9 @@ class MainActivity : ComponentActivity() {
     private var serviceNoiseReady by mutableStateOf(false)
     private var serviceNoiseModes by mutableStateOf(emptyList<String>())
     private var serviceNoiseStatus by mutableStateOf("Waiting for headset")
+    private var rfcommProbeStatus by mutableStateOf("Not probed")
     private var clarityValue by mutableFloatStateOf(0f)
+    private var globalMixFallbackEnabled by mutableStateOf(false)
     private var bassBoostEnabled by mutableStateOf(false)
     private var spatialEnabled by mutableStateOf(false)
     private var lastAppliedJblRoute: Boolean? = null
@@ -577,6 +579,7 @@ class MainActivity : ComponentActivity() {
                     serviceNoiseReady = intent.getBooleanExtra(VerlynConnectionService.EXTRA_NOISE_READY, serviceNoiseReady)
                     serviceNoiseModes = intent.getStringArrayListExtra(VerlynConnectionService.EXTRA_NOISE_MODES)?.toList() ?: serviceNoiseModes
                     serviceNoiseStatus = intent.getStringExtra(VerlynConnectionService.EXTRA_NOISE_STATUS) ?: serviceNoiseStatus
+                    rfcommProbeStatus = intent.getStringExtra(VerlynConnectionService.EXTRA_RFCOMM_PROBE_STATUS) ?: rfcommProbeStatus
                 }
                 VerlynConnectionService.ACTION_PACKET -> {
                     val uuid = intent.getStringExtra(VerlynConnectionService.EXTRA_PACKET_UUID) ?: "RFCOMM"
@@ -644,6 +647,12 @@ class MainActivity : ComponentActivity() {
         audioEngine.setBypassed(false)
         audioEngine.setBassBoost(bassBoostEnabled)
         audioEngine.setSpatial(spatialEnabled)
+        if (globalMixFallbackEnabled) {
+            audioEngine.setGlobalMixFallback(
+                true, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled,
+                if (balanceEnabled) balance else 0f
+            )
+        }
         audioEffectStatus = audioEngine.statusForEffects()
         voiceAnnouncer = VoiceAnnouncer(this) { status ->
             runOnUiThread {
@@ -652,10 +661,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         eqTestPlayer = EqTestAudioPlayer(audioEngine) { status ->
-            runOnUiThread {
-                testAudioStatus = status
-                appendLog("EQ test: " + status)
-            }
+            runOnUiThread { updateTestAudioStatus(status) }
         }
         handleAudioEffectPanelIntent(intent)
         refreshVolume()
@@ -735,6 +741,8 @@ class MainActivity : ComponentActivity() {
                     autoEqRules = autoEqRules.toMap(),
                     codecStatus = audioCodecStatus,
                     nativeBandCentersHz = audioEngine.nativeBandCenterFrequenciesHz(),
+                    globalMixFallbackEnabled = globalMixFallbackEnabled,
+                    rfcommProbeStatus = rfcommProbeStatus,
                     lastCrashReport = lastCrashReport,
                     audioBypassed = audioBypassed,
                     bassPunch = bassPunch,
@@ -755,6 +763,7 @@ class MainActivity : ComponentActivity() {
                     onScanClassicSdp = { scanClassicSdpUuids() },
                     onAirohaListener = { toggleAirohaRxListener() },
                     onCopyDump = { copyGattDump() },
+                    onProbeAllRfcommUuids = { startConnectionService(VerlynConnectionService.ACTION_PROBE_RFCOMM_UUIDS) },
                     onCopyCrashTrace = {
                         if (lastCrashReport.isNotBlank()) {
                             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -834,6 +843,16 @@ class MainActivity : ComponentActivity() {
                             saveAudioPreferences()
                             eqTestPlayer.play(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
                         }
+                    },
+                    onGlobalMixFallbackChange = { enabled ->
+                        globalMixFallbackEnabled = enabled
+                        preferences.edit().putBoolean("global_mix_fallback_enabled", enabled).apply()
+                        audioEngine.setGlobalMixFallback(
+                            enabled, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled,
+                            if (balanceEnabled) balance else 0f
+                        )
+                        audioEffectStatus = audioEngine.statusForEffects()
+                        appendLog(if (enabled) "Global Mix fallback explicitly enabled · AudioEffect session 0 attempt" else "Global Mix fallback disabled")
                     },
                     onPowerOffHeadset = { VerlynConnectionService.requestPowerOff(this@MainActivity) },
                     onAutoEqRuleChange = { packageName, preset ->
@@ -1559,9 +1578,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isVerlynDefaultAssistant(): Boolean = runCatching {
+        val assistant = Settings.Secure.getString(contentResolver, "assistant").orEmpty()
         val selected = Settings.Secure.getString(contentResolver, "voice_interaction_service").orEmpty()
-        val component = ComponentName(this, VerlynAssistantVoiceInteractionService::class.java)
-        selected.equals(component.flattenToString(), ignoreCase = true) ||
+        val component = ComponentName(this, VerlynVoiceInteractionService::class.java)
+        assistant.equals(packageName, ignoreCase = true) ||
+            assistant.contains(packageName, ignoreCase = true) ||
+            selected.equals(component.flattenToString(), ignoreCase = true) ||
             selected.equals(component.flattenToShortString(), ignoreCase = true)
     }.getOrDefault(false)
 
@@ -1913,6 +1935,7 @@ class MainActivity : ComponentActivity() {
         trebleAir = preferences.getFloat("mbc_treble_air", 0f).coerceIn(-6f, 6f)
         bassBoostStrength = preferences.getInt("bass_boost_strength", 65).coerceIn(0, 100).toFloat()
         spatialStrength = preferences.getInt("spatial_strength", 65).coerceIn(0, 100).toFloat()
+        globalMixFallbackEnabled = preferences.getBoolean("global_mix_fallback_enabled", false)
     }
 
     private fun saveAudioPreferences() {
@@ -1931,6 +1954,7 @@ class MainActivity : ComponentActivity() {
             .putFloat("mbc_vocal_presence", vocalPresence)
             .putFloat("mbc_treble_air", trebleAir)
             .putString("audio_engine_mode", engineMode)
+            .putBoolean("global_mix_fallback_enabled", globalMixFallbackEnabled)
             .apply()
         if (lastAppliedJblRoute == true) {
             preferences.edit()
@@ -2014,6 +2038,22 @@ class MainActivity : ComponentActivity() {
         } catch (error: Throwable) {
             Toast.makeText(this, "Media key unavailable: ${error.message ?: "unsupported"}", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun updateTestAudioStatus(status: String) {
+        testAudioStatus = status
+        val isPlaying = status.startsWith("Verlyn Test Beat", ignoreCase = true) &&
+            status.contains("playing", ignoreCase = true)
+        if (isPlaying) {
+            val sessionId = Regex("Session\\s+(\\d+)").find(status)?.groupValues?.getOrNull(1)
+            if (sessionId != null) {
+                audioSessionBindings = (audioSessionBindings.filterNot { it.startsWith("Verlyn Test Beat ·") } +
+                    "Verlyn Test Beat · Session " + sessionId).distinct()
+            }
+        } else if (status.contains("stopped", ignoreCase = true) || status.contains("failed", ignoreCase = true)) {
+            audioSessionBindings = audioSessionBindings.filterNot { it.startsWith("Verlyn Test Beat ·") }
+        }
+        appendLog("EQ test: " + status)
     }
 
     private fun speakNow(message: String) {
