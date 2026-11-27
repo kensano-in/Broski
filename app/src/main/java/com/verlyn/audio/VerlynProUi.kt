@@ -98,6 +98,7 @@ data class VerlynProUiState(
     val companionConfigured: Boolean = false,
     val batteryUnrestricted: Boolean = false,
     val assistantSelected: Boolean = false,
+    val nativeBandCentersHz: List<Int> = emptyList(),
     val audioBypassed: Boolean = false,
     val bassPunch: Float = 0f,
     val vocalPresence: Float = 0f,

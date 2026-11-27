@@ -720,6 +720,7 @@ class MainActivity : ComponentActivity() {
                     companionConfigured = companionConfigured,
                     batteryUnrestricted = batteryUnrestricted,
                     assistantSelected = assistantSelected,
+                    nativeBandCentersHz = audioEngine.nativeBandCenterFrequenciesHz(),
                     audioBypassed = audioBypassed,
                     bassPunch = bassPunch,
                     vocalPresence = vocalPresence,

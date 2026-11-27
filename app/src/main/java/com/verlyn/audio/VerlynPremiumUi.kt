@@ -212,6 +212,7 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
 @Composable
 private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
     var active by remember { mutableIntStateOf(-1) }
+    var activeGain by remember { mutableFloatStateOf(0f) }
     var draft by remember(s.gains) { mutableStateOf(s.gains) }
     var showSave by remember { mutableStateOf(false) }
     var presetName by remember { mutableStateOf("My JBL Profile") }
@@ -247,7 +248,7 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("10-BAND EQUALIZER", fontWeight = FontWeight.Bold)
+                    Text(if (s.engineMode == "native" && s.nativeBandCentersHz.isNotEmpty()) "${s.nativeBandCentersHz.size}-BAND NATIVE EQUALIZER" else "10-BAND EQUALIZER", fontWeight = FontWeight.Bold)
                     Text(s.selectedPreset, color = VBlueLight, fontSize = 10.sp)
                 }
                 Switch(s.eqEnabled, a.onEqEnabledChange)
@@ -265,17 +266,26 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("−12 dB", color = VMuted, fontSize = 9.sp)
-                Text(if (active >= 0) String.format(Locale.US, "%+.1f dB", draft.getOrElse(active) { 0f }) else "DRAG A NODE", color = VBlueLight, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text(if (active >= 0) String.format(Locale.US, "%+.1f dB", activeGain) else "DRAG A NODE", color = VBlueLight, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 Text("+12 dB", color = VMuted, fontSize = 9.sp)
             }
-            EqSpline(draft) { index, value ->
-                if (active != index) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                active = index
-                draft = draft.toMutableList().also { it[index] = value }
-                a.onGainChange(index, value)
+            val graphCenters = if (s.engineMode == "native" && s.nativeBandCentersHz.size >= 3) s.nativeBandCentersHz else listOf(32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
+            val graphValues = remember(draft, graphCenters) {
+                graphCenters.map { frequency -> gainAtFrequency(frequency.toFloat(), draft) }
+            }
+            EqSpline(graphValues) { nodeIndex, value ->
+                val frequency = graphCenters.getOrElse(nodeIndex) { 1000 }
+                val gainIndex = VerlynAudioEngine.BAND_FREQUENCIES.indices.minByOrNull { index ->
+                    kotlin.math.abs(kotlin.math.ln(VerlynAudioEngine.BAND_FREQUENCIES[index].toDouble()) - kotlin.math.ln(frequency.toDouble()))
+                } ?: nodeIndex.coerceIn(0, 9)
+                if (active != nodeIndex) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                active = nodeIndex
+                activeGain = value
+                draft = draft.toMutableList().also { it[gainIndex] = value }
+                a.onGainChange(gainIndex, value)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                listOf("32", "64", "125", "250", "500", "1k", "2k", "4k", "8k", "16k").forEach { Text(it, color = VMuted, fontSize = 7.sp) }
+                graphCenters.forEach { frequency -> Text(formatEqFrequency(frequency), color = VMuted, fontSize = 7.sp, maxLines = 1) }
             }
             OutlinedButton(onClick = a.onTestEq, modifier = Modifier.fillMaxWidth()) {
                 Text(if (s.testAudioStatus.contains("playing", true)) "STOP TEST BEAT" else "TEST BEAT")
@@ -341,6 +351,24 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
     }
 }
 
+private fun gainAtFrequency(frequencyHz: Float, gains: List<Float>): Float {
+    val anchors = VerlynAudioEngine.BAND_FREQUENCIES
+    val frequency = frequencyHz.coerceAtLeast(1f)
+    if (frequency <= anchors.first()) return gains.firstOrNull() ?: 0f
+    if (frequency >= anchors.last()) return gains.lastOrNull() ?: 0f
+    val upper = anchors.indexOfFirst { it >= frequency }.coerceIn(1, anchors.lastIndex)
+    val lower = upper - 1
+    val ratio = ((kotlin.math.ln(frequency.toDouble()) - kotlin.math.ln(anchors[lower].toDouble())) /
+        (kotlin.math.ln(anchors[upper].toDouble()) - kotlin.math.ln(anchors[lower].toDouble()))).toFloat()
+    return gains.getOrElse(lower) { 0f } + (gains.getOrElse(upper) { 0f } - gains.getOrElse(lower) { 0f }) * ratio
+}
+
+private fun formatEqFrequency(frequencyHz: Int): String =
+    if (frequencyHz >= 1000) {
+        val value = frequencyHz / 1000f
+        if (frequencyHz % 1000 == 0) "${value.toInt()}k" else String.format(Locale.US, "%.1fk", value)
+    } else "${frequencyHz}Hz"
+
 @Composable
 private fun EqSpline(gains: List<Float>, onChange: (Int, Float) -> Unit) {
     val current by rememberUpdatedState(gains)
@@ -348,17 +376,20 @@ private fun EqSpline(gains: List<Float>, onChange: (Int, Float) -> Unit) {
     Canvas(Modifier.fillMaxWidth().height(218.dp).padding(horizontal = 8.dp).pointerInput(Unit) {
         detectDragGestures(
             onDragStart = { p ->
-                val i = ((p.x / size.width) * 9f).roundToInt().coerceIn(0, 9)
+                val lastIndex = (current.size - 1).coerceAtLeast(1)
+                val i = ((p.x / size.width) * lastIndex).roundToInt().coerceIn(0, lastIndex)
                 callback(i, (12f - p.y / size.height * 24f).coerceIn(-12f, 12f))
             },
             onDrag = { change, _ ->
                 change.consume()
-                val i = ((change.position.x / size.width) * 9f).roundToInt().coerceIn(0, 9)
+                val lastIndex = (current.size - 1).coerceAtLeast(1)
+                val i = ((change.position.x / size.width) * lastIndex).roundToInt().coerceIn(0, lastIndex)
                 callback(i, (12f - change.position.y / size.height * 24f).coerceIn(-12f, 12f))
             }
         )
     }) {
-        val points = List(10) { i -> Offset(size.width * i / 9f, size.height * (12f - current.getOrElse(i) { 0f }.coerceIn(-12f, 12f)) / 24f) }
+        val pointCount = current.size.coerceAtLeast(2)
+        val points = List(pointCount) { i -> Offset(size.width * i / (pointCount - 1f), size.height * (12f - current.getOrElse(i) { 0f }.coerceIn(-12f, 12f)) / 24f) }
         for (i in 0..4) {
             val y = size.height * i / 4f
             drawLine(VBorder, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())

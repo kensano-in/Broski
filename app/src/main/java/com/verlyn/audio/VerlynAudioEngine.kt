@@ -66,6 +66,14 @@ class VerlynAudioEngine(
     fun currentEngineMode(): String = preferredEngine
 
     @Synchronized
+    fun nativeBandCenterFrequenciesHz(): List<Int> {
+        val equalizer = equalizers.values.firstOrNull() ?: return emptyList()
+        return (0 until equalizer.numberOfBands.toInt()).map { band ->
+            (equalizer.getCenterFreq(band.toShort()).toInt() / 1000).coerceAtLeast(1)
+        }
+    }
+
+    @Synchronized
     fun attachSession(
         sessionId: Int,
         packageName: String,
