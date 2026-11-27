@@ -329,7 +329,9 @@ class VerlynConnectionService : Service() {
                 if (commandMode == CommandMode.IDLE) {
                     savedCommandVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                     commandMode = CommandMode.COMMAND_WINDOW
+                    voiceAnnouncer.beginCommandSession()
                     syncHeadsetVolumeReceiver()
+                    appendRaceLog("COMMAND MODE · IDLE → COMMAND_WINDOW · notification briefing")
                 }
                 runConfiguredCommand("command_center_long_hold", "speak_full_briefing")
             }
@@ -692,6 +694,7 @@ class VerlynConnectionService : Service() {
     private fun enterCommandWindow() {
         savedCommandVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
         commandMode = CommandMode.COMMAND_WINDOW
+        voiceAnnouncer.beginCommandSession()
         syncHeadsetVolumeReceiver()
         appendRaceLog("COMMAND MODE · IDLE → COMMAND_WINDOW · savedVolume=$savedCommandVolume")
         val time = java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date())
@@ -753,7 +756,8 @@ class VerlynConnectionService : Service() {
     private fun speakCommand(message: String) {
         commandSpeechPending = true
         main.removeCallbacks(commandWindowTimeout)
-        if (!voiceAnnouncer.speak(message)) {
+        val retainFocus = commandMode != CommandMode.IDLE && !commandEqPreviewPending
+        if (!voiceAnnouncer.speak(message, keepFocusAfter = retainFocus)) {
             commandSpeechPending = false
             resetCommandTimeout()
         }
@@ -804,6 +808,7 @@ class VerlynConnectionService : Service() {
         commandMode = CommandMode.IDLE
         restoreCommandVolume()
         savedCommandVolume = -1
+        voiceAnnouncer.endCommandSession()
         syncHeadsetVolumeReceiver()
         if (previous != CommandMode.IDLE) appendRaceLog("COMMAND MODE · $previous → IDLE · $reason")
         if (!isJblA2dpRouteActive()) {
@@ -815,8 +820,8 @@ class VerlynConnectionService : Service() {
     private fun lockEqScrollMode() {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val preset = prefs.getString("preset", "Flat") ?: "Flat"
-        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
         closeCommandMode("EQ preset locked")
+        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
         voiceAnnouncer.speak("$preset locked")
     }
 
@@ -828,12 +833,11 @@ class VerlynConnectionService : Service() {
         val current = prefs.getString("preset", "Flat") ?: "Flat"
         val index = names.indexOf(current).let { if (it < 0) 0 else it }
         val next = names[(index + direction + names.size) % names.size]
-        val selected = headsetPreset(next)
+        val selected = resolvePresetProfile(prefs, next)
         prefs.edit().putString("preset", next).putString("eq_gains", selected.first.joinToString(","))
             .putFloat("preamp", selected.second).apply()
         reapplyAudioSettings()
         commandEqPreviewPending = true
-        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
         main.postDelayed({
             if (commandMode == CommandMode.EQ_SCROLL_MODE) speakCommand(next)
         }, 250L)
@@ -847,7 +851,7 @@ class VerlynConnectionService : Service() {
         val current = prefs.getString("preset", "Flat") ?: "Flat"
         val index = names.indexOf(current).let { if (it < 0) 0 else it }
         val next = names[(index + 1) % names.size]
-        val selected = headsetPreset(next)
+        val selected = resolvePresetProfile(prefs, next)
         prefs.edit().putString("preset", next).putString("eq_gains", selected.first.joinToString(","))
             .putFloat("preamp", selected.second).apply()
         reapplyAudioSettings()
@@ -867,7 +871,7 @@ class VerlynConnectionService : Service() {
 
     private fun cycleSleepTimer() {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        val steps = listOf(15, 30, 45, 60, 0)
+        val steps = listOf(15, 30, 60, 0)
         val current = prefs.getInt("sleep_timer_minutes", 0)
         val next = steps[(steps.indexOf(current).coerceAtLeast(-1) + 1) % steps.size]
         prefs.edit().putInt("sleep_timer_minutes", next).apply()
@@ -952,7 +956,7 @@ class VerlynConnectionService : Service() {
                 val names = (listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming") + custom).distinct()
                 val current = prefs.getString("preset", "Flat") ?: "Flat"
                 val next = names[(names.indexOf(current).coerceAtLeast(-1) + 1) % names.size]
-                val preset = headsetPreset(next)
+                val preset = resolvePresetProfile(prefs, next)
                 prefs.edit()
                     .putString("preset", next)
                     .putString("eq_gains", preset.first.joinToString(","))
@@ -1234,6 +1238,20 @@ class VerlynConnectionService : Service() {
         )
         VerlynAudioRuntime.get(this).setBassBoost(prefs.getBoolean("bass_boost_enabled", false))
         VerlynAudioRuntime.get(this).setSpatial(prefs.getBoolean("spatial_enabled", false))
+        activeAudioSessions.toMap().forEach { (sessionId, packageName) ->
+            val assignedPreset = prefs.getString("auto_eq_rule:" + packageName, null)
+                ?.takeIf { it.isNotBlank() && it != "Off" }
+            val assignedProfile = assignedPreset?.let { resolvePresetProfile(prefs, it) }
+            VerlynAudioRuntime.get(this).attachSession(
+                sessionId,
+                packageName,
+                assignedProfile?.first ?: gains,
+                assignedProfile?.second ?: prefs.getFloat("preamp", 0f),
+                prefs.getBoolean("eq_enabled", true),
+                prefs.getBoolean("limiter_enabled", true),
+                balance
+            )
+        }
         publishState()
     }
 
