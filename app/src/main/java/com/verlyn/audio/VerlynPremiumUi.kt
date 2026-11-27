@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +44,7 @@ private val VWhite = Color(0xFFF8FAFC)
 private val VMuted = Color(0xFF8E98A8)
 private val VGreen = Color(0xFF63D6A0)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VerlynPremiumApp(state: VerlynProUiState, actions: VerlynProUiActions) {
     MaterialTheme(colorScheme = darkColorScheme(primary = VBlue, onPrimary = VWhite, background = VBlack, onBackground = VWhite, surface = VCard, onSurface = VWhite)) {

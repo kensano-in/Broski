@@ -95,19 +95,20 @@ class VerlynConnectionService : Service() {
 
     private val audioSessionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            val id = intent?.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, -1) ?: -1
+            val data = intent ?: return
+            val id = data.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, -1)
             if (id <= 0) return
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             if (!prefs.getBoolean("session_compatibility", true)) return
             val gains = prefs.getString("eq_gains", null)?.split(",")?.mapNotNull { it.toFloatOrNull() }
                 ?.takeIf { it.size == 10 }?.toFloatArray() ?: FloatArray(10)
             val balance = if (prefs.getBoolean("balance_enabled", false)) prefs.getFloat("balance", 0f) else 0f
-            if (intent.action == AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION) {
+            if (data.action == AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION) {
                 VerlynAudioRuntime.get(this@VerlynConnectionService).attachSession(
                     id, gains, prefs.getFloat("preamp", 0f), prefs.getBoolean("eq_enabled", true),
                     prefs.getBoolean("limiter_enabled", true), balance
                 )
-            } else if (intent.action == AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION) {
+            } else if (data.action == AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION) {
                 VerlynAudioRuntime.get(this@VerlynConnectionService).detachSession(id)
             }
         }

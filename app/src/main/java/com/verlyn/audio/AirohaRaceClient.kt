@@ -183,7 +183,7 @@ class AirohaRaceClient {
 
     private fun modeOf(filter: Int?, layout: Layout): String? = when (filter) {
         0 -> "Off"
-        filter != null && filter in 1..4 -> "ANC"
+        1, 2, 3, 4 -> "ANC"
         9 -> if (layout == Layout.AB156X) "TalkThru" else null
         10 -> if (layout == Layout.AB156X) "Ambient Aware" else null
         else -> null
