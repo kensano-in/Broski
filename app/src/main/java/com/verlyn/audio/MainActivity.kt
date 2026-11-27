@@ -457,7 +457,7 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.getStringExtra(VerlynSmartButtonService.EXTRA_ACTION)) {
                 "apply_preset" -> intent.getStringExtra(VerlynSmartButtonService.EXTRA_VALUE)?.let { applyPreset(it) }
-                "limiter_changed" -> setLimiterEnabled(intent.getBooleanExtra(VerlynSmartButtonService.EXTRA_ENABLED, limiterEnabled))
+                "limiter_changed" -> updateLimiterEnabled(intent.getBooleanExtra(VerlynSmartButtonService.EXTRA_ENABLED, limiterEnabled))
             }
         }
     }
@@ -603,7 +603,7 @@ class MainActivity : ComponentActivity() {
                         preferences.edit().putFloat("balance", balance).apply()
                         applyAudioSettings()
                     },
-                    onLimiterChange = { setLimiterEnabled(it) },
+                    onLimiterChange = { updateLimiterEnabled(it) },
                     onSessionCompatibilityChange = { updateSessionCompatibility(it) },
                     onTriggerActionChange = { slot, action ->
                         smartTriggerActions[slot] = action
@@ -1228,7 +1228,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun setLimiterEnabled(enabled: Boolean) {
+    private fun updateLimiterEnabled(enabled: Boolean) {
         limiterEnabled = enabled
         preferences.edit().putBoolean("limiter_enabled", enabled).apply()
         applyAudioSettings()
