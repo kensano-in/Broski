@@ -134,7 +134,7 @@ data class VerlynProUiActions(
     val onManualRfcommHexChange: (String) -> Unit = {},
     val onSendRfcommHex: () -> Unit = {},
     val onHeadsetGesturesEnabledChange: (Boolean) -> Unit = {},
-    val onHeadsetTriggerActionChange: (String, String) -> Unit = {}
+    val onHeadsetTriggerActionChange: (String, String) -> Unit = { _, _ -> }
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)

@@ -409,15 +409,17 @@ class VerlynAudioEngine(
             val bass = bassEffects[id]
             val virtualizer = virtualizers[id]
             val limiter = dynamics[id] ?: nativeLimiters[id]
+            val limiterEnabledState = limiter?.let { runCatching { it.enabled }.getOrDefault(false) } ?: false
             packageName + " (Session " + id + ") · " + (engineNames[id] ?: "Unknown") +
                 " · hasControl=" + control + " · enabled=" + enabled +
                 " · BassBoost(control=" + (bass?.let { runCatching { it.hasControl() }.getOrDefault(false) } ?: false) +
                 ", enabled=" + (bass?.let { runCatching { it.enabled }.getOrDefault(false) } ?: false) +
                 ", strength=" + (bass?.let { runCatching { it.roundedStrength.toInt() }.getOrDefault(0) } ?: 0) + ")" +
                 " · Virtualizer(control=" + (virtualizer?.let { runCatching { it.hasControl() }.getOrDefault(false) } ?: false) +
-                ", enabled=" + (virtualizer?.let { runCatching { it.enabled }.getOrDefault(false) } ?: false) + ")" +
+                ", enabled=" + (virtualizer?.let { runCatching { it.enabled }.getOrDefault(false) } ?: false) +
+                ", strength=" + (virtualizer?.let { runCatching { it.roundedStrength.toInt() }.getOrDefault(0) } ?: 0) + ")" +
                 " · PeakLimiter(control=" + (limiter?.let { runCatching { it.hasControl() }.getOrDefault(false) } ?: false) +
-                ", enabled=" + lastConfig.limiterEnabled + ")"
+                ", enabled=" + limiterEnabledState + ")"
         }
     }
 
@@ -437,11 +439,12 @@ class VerlynAudioEngine(
             val bass = bassEffects[first]
             val virtualizer = virtualizers[first]
             val limiter = dynamics[first] ?: nativeLimiters[first]
+            val limiterEnabledState = limiter?.let { runCatching { it.enabled }.getOrDefault(false) } ?: false
             return engine + " · " + name + " · Session " + first + " · control=" + hasControl + " · enabled=" + enabled +
                 " · BassBoost=" + (bass?.let { runCatching { it.hasControl() && it.enabled }.getOrDefault(false) } ?: false) +
                 " · Virtualizer=" + (virtualizer?.let { runCatching { it.hasControl() && it.enabled }.getOrDefault(false) } ?: false) +
                 " · LimiterControl=" + (limiter?.let { runCatching { it.hasControl() }.getOrDefault(false) } ?: false) +
-                " · LimiterEnabled=" + lastConfig.limiterEnabled
+                " · LimiterEnabled=" + limiterEnabledState
         }
         val global = dynamics[0]
         val legacy = equalizers[0]

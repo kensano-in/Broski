@@ -248,10 +248,10 @@ class VerlynConnectionService : Service() {
                 connectManualRfcomm(data?.getStringExtra(EXTRA_MANUAL_RFCOMM_UUID).orEmpty())
             }
             ACTION_MANUAL_RFCOMM_SEND -> {
-                val bytes = data?.getByteArrayExtra(EXTRA_MANUAL_RFCOMM_BYTES)
+                val bytes = data?.getByteArrayExtra(EXTRA_MANUAL_RFCOMM_BYTES) ?: ByteArray(0)
                 val requestedUuid = data?.getStringExtra(EXTRA_MANUAL_RFCOMM_UUID)
                 val activeUuid = rfcomm.connectedUuid()?.toString()
-                if (bytes.isNullOrEmpty()) {
+                if (bytes.isEmpty()) {
                     linkStatus = "RFCOMM TX blocked · empty captured frame"
                     publishState()
                 } else if (requestedUuid.isNullOrBlank() || activeUuid != requestedUuid) {
@@ -533,14 +533,14 @@ class VerlynConnectionService : Service() {
     private fun handleHeadsetVolumeChanged(intent: Intent) {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         if (!prefs.getBoolean("headset_earcup_gestures_enabled", false)) return
-        if (intent.getIntExtra(AudioManager.EXTRA_VOLUME_STREAM_TYPE, -1) != AudioManager.STREAM_MUSIC) return
+        if (intent.getIntExtra(EXTRA_VOLUME_STREAM_TYPE, -1) != AudioManager.STREAM_MUSIC) return
         val now = SystemClock.elapsedRealtime()
         if (VerlynVolumeChangeGuard.shouldIgnore(now)) {
             appendRaceLog("Headset gesture ignored · VERLYN self-volume guard")
             return
         }
-        val current = intent.getIntExtra(AudioManager.EXTRA_VOLUME_STREAM_VALUE, -1)
-        val previous = intent.getIntExtra(AudioManager.EXTRA_PREV_VOLUME_STREAM_VALUE, -1)
+        val current = intent.getIntExtra(EXTRA_VOLUME_STREAM_VALUE, -1)
+        val previous = intent.getIntExtra(EXTRA_PREV_VOLUME_STREAM_VALUE, -1)
         if (current < 0 || previous < 0 || current == previous) return
         val direction = if (current < previous) -1 else 1
         while (headsetVolumeSteps.isNotEmpty() && now - headsetVolumeSteps.first().at > HEADSET_GESTURE_WINDOW_MS) {
@@ -865,6 +865,9 @@ class VerlynConnectionService : Service() {
         private const val BATTERY_ACTION = "android.bluetooth.device.action.BATTERY_LEVEL_CHANGED"
         private const val BATTERY_EXTRA = "android.bluetooth.device.extra.BATTERY_LEVEL"
         private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
+        private const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
+        private const val EXTRA_VOLUME_STREAM_VALUE = "android.media.EXTRA_VOLUME_STREAM_VALUE"
+        private const val EXTRA_PREV_VOLUME_STREAM_VALUE = "android.media.EXTRA_PREV_VOLUME_STREAM_VALUE"
         private const val BATTERY_BROADCAST_FRESH_MS = 10 * 60 * 1000L
         private const val HEADSET_GESTURE_WINDOW_MS = 1_100L
         const val HEADSET_DOWN_THREE = "headset_volume_down_3"
