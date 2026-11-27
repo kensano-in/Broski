@@ -69,7 +69,7 @@ class VerlynAudioEngine(
 
     @Synchronized
     fun nativeBandCenterFrequenciesHz(): List<Int> {
-        val equalizer = equalizers.values.firstOrNull() ?: return emptyList()
+        val equalizer = equalizers.entries.firstOrNull { it.key != 0 }?.value ?: equalizers[0] ?: return emptyList()
         return (0 until equalizer.numberOfBands.toInt()).map { band ->
             (equalizer.getCenterFreq(band.toShort()).toInt() / 1000).coerceAtLeast(1)
         }
