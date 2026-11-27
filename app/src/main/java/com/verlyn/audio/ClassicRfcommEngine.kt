@@ -98,7 +98,10 @@ class ClassicRfcommEngine(
                 if (bytes.size - cursor < 4 + length) break
                 if (group == 0x03 && code == 0x03) {
                     val payload = bytes.copyOfRange(cursor + 4, cursor + 4 + length)
-                    val known = payload.map { it.toInt() and 0xFF }.filter { it in 0..100 } // 0x7F = unknown
+                    // Fast Pair battery octets use bit 7 as the charging flag and
+                    // bits 0..6 as the percentage. 0x7F / 0xFF mean unknown.
+                    val known = payload.map { (it.toInt() and 0xFF) and 0x7F }
+                        .filter { it in 0..100 }
                     if (known.isNotEmpty()) onBattery(known)
                 }
                 cursor += 4 + length
