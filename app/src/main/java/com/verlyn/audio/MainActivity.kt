@@ -161,6 +161,7 @@ class MainActivity : ComponentActivity() {
     private var companionConfigured by mutableStateOf(false)
     private var batteryUnrestricted by mutableStateOf(false)
     private var assistantSelected by mutableStateOf(false)
+    private var quickSetupDismissed by mutableStateOf(false)
     private var audioBypassed by mutableStateOf(false)
     private var bassPunch by mutableFloatStateOf(0f)
     private var vocalPresence by mutableFloatStateOf(0f)
@@ -212,7 +213,8 @@ class MainActivity : ComponentActivity() {
     private var a2dpProxy: BluetoothA2dp? = null
     private var headsetProxy: BluetoothHeadset? = null
     private var audioManager: AudioManager? = null
-    private lateinit var audioEngine: VerlynAudioEngine
+    private val audioEngine: VerlynAudioEngine
+        get() = VerlynAudioRuntime.get(this)
 
     private var appStatus by mutableStateOf("Ready")
     private var bleState by mutableStateOf("DISCONNECTED")
@@ -242,7 +244,7 @@ class MainActivity : ComponentActivity() {
     private val raceCaptureLog = mutableStateListOf<String>()
     private var ttsStatus by mutableStateOf("TTS initializing")
     private var testAudioStatus by mutableStateOf("")
-    private var smartKeyStatus by mutableStateOf("Waiting for volume-key input")
+    private var smartKeyStatus by mutableStateOf("Waiting for headset assistant command")
     private var serviceNoiseMode by mutableStateOf("Unknown")
     private var serviceNoiseReady by mutableStateOf(false)
     private var serviceNoiseModes by mutableStateOf(emptyList<String>())
@@ -634,7 +636,6 @@ class MainActivity : ComponentActivity() {
         loadAudioPreferences()
         loadAutoEqRules()
         refreshQuickSetupStatus()
-        audioEngine = VerlynAudioRuntime.get(this)
         audioEngine.setEngineMode(engineMode)
         audioEngine.setMbcTuning(bassPunch, vocalPresence, trebleAir)
         audioEngine.setBassBoostStrength(bassBoostStrength.toInt())
@@ -658,6 +659,7 @@ class MainActivity : ComponentActivity() {
         handleAudioEffectPanelIntent(intent)
         refreshVolume()
         registerBluetoothReceiver()
+        registerAudioEffectReceiver()
         registerSmartActionReceiver()
         registerRuntimeStateReceiver()
         loadSmartPreferences()
@@ -728,6 +730,7 @@ class MainActivity : ComponentActivity() {
                     companionConfigured = companionConfigured,
                     batteryUnrestricted = batteryUnrestricted,
                     assistantSelected = assistantSelected,
+                    quickSetupDismissed = quickSetupDismissed,
                     autoEqRules = autoEqRules.toMap(),
                     codecStatus = audioCodecStatus,
                     nativeBandCentersHz = audioEngine.nativeBandCenterFrequenciesHz(),
@@ -848,6 +851,10 @@ class MainActivity : ComponentActivity() {
                     onAssociateHeadset = { associateJblCompanion() },
                     onRequestBatteryUnrestricted = { requestBatteryUnrestricted() },
                     onOpenVoiceInputSettings = { openVoiceInputSettings() },
+                    onDismissQuickSetup = {
+                        quickSetupDismissed = true
+                        preferences.edit().putBoolean("quick_setup_dismissed", true).apply()
+                    },
                     onEqBypassChange = { enabled ->
                         audioBypassed = enabled
                         audioEngine.setBypassed(enabled)
@@ -1499,13 +1506,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadSmartPreferences() {
-        val slots = listOf(
-            "trigger_volume_down_long" to "speak_time",
-            "trigger_volume_up_long" to "speak_battery",
-            "trigger_volume_down_double" to "cycle_eq",
-            "trigger_volume_up_double" to "toggle_limiter"
-        )
-        slots.forEach { (key, defaultValue) -> smartTriggerActions[key] = preferences.getString(key, defaultValue) ?: defaultValue }
+        smartTriggerActions.clear()
         val commandSlots = listOf(
             "command_vol_up_single" to "speak_battery",
             "command_vol_down_single" to "enter_eq_scroll",
@@ -1521,10 +1522,11 @@ class MainActivity : ComponentActivity() {
         refreshQuickSetupStatus()
     }
 
-    private fun isSmartAccessibilityEnabled(): Boolean = runCatching {
+    private fun isVerlynDefaultAssistant(): Boolean = runCatching {
         val selected = Settings.Secure.getString(contentResolver, "voice_interaction_service").orEmpty()
-        selected.contains(packageName, ignoreCase = true) &&
-            selected.contains(VerlynAssistantVoiceInteractionService::class.java.simpleName, ignoreCase = true)
+        val component = ComponentName(this, VerlynAssistantVoiceInteractionService::class.java)
+        selected.equals(component.flattenToString(), ignoreCase = true) ||
+            selected.equals(component.flattenToShortString(), ignoreCase = true)
     }.getOrDefault(false)
 
     private fun refreshQuickSetupStatus() {
@@ -1532,8 +1534,9 @@ class MainActivity : ComponentActivity() {
         batteryUnrestricted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             runCatching { (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName) }.getOrDefault(false)
         } else true
-        assistantSelected = isSmartAccessibilityEnabled()
-        accessibilityEnabled = assistantSelected
+        assistantSelected = isVerlynDefaultAssistant()
+        accessibilityEnabled = false
+        quickSetupDismissed = preferences.getBoolean("quick_setup_dismissed", false)
     }
 
     private fun openVoiceInputSettings() {
@@ -2006,7 +2009,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::audioEngine.isInitialized) applyAudioSettings()
+        applyAudioSettings()
         refreshVolume(); refreshClassicState(); refreshOutputRoute()
         refreshQuickSetupStatus()
         if (adapter != null && hasBluetoothPermissions() && adapter?.isEnabled == true && !scanActive) {
