@@ -241,6 +241,7 @@ class MainActivity : ComponentActivity() {
     private var modelId by mutableStateOf("")
     private var audioSessionBindings by mutableStateOf(emptyList<String>())
     private var audioCodecStatus by mutableStateOf("Unavailable")
+    private var lastCrashReport by mutableStateOf("")
     private val raceCaptureLog = mutableStateListOf<String>()
     private var ttsStatus by mutableStateOf("TTS initializing")
     private var testAudioStatus by mutableStateOf("")
@@ -312,8 +313,7 @@ class MainActivity : ComponentActivity() {
         val channelBalance = if (balanceEnabled) balance else 0f
         audioEngine.setMbcTuning(bassPunch, vocalPresence, trebleAir)
         lifecycleScope.launch(Dispatchers.Default) {
-            if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(gains, currentPreamp, enabled, limited, channelBalance)
-            else audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
+            audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
         }
     }
 
@@ -323,7 +323,6 @@ class MainActivity : ComponentActivity() {
                 loadPairedDevices()
                 startScan()
                 requestProfileProxies()
-                startConnectionService()
             } else appStatus = "Nearby devices permission is required for Bluetooth discovery."
         }
 
@@ -629,6 +628,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lastCrashReport = getSharedPreferences(VerlynApplication.CRASH_PREFS, Context.MODE_PRIVATE)
+            .getString(VerlynApplication.KEY_LAST_CRASH, "").orEmpty()
         val manager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
         adapter = manager.adapter
         scanner = adapter?.bluetoothLeScanner
@@ -655,7 +656,6 @@ class MainActivity : ComponentActivity() {
                 appendLog("EQ test: " + status)
             }
         }
-        audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
         handleAudioEffectPanelIntent(intent)
         refreshVolume()
         registerBluetoothReceiver()
@@ -670,7 +670,7 @@ class MainActivity : ComponentActivity() {
             VerlynPremiumApp(
                 state = VerlynProUiState(
                     selectedTab = selectedTab,
-                    audioConnected = a2dpConnected || headsetConnected || outputRoute.contains("JBL Tune 770NC", true),
+                    audioConnected = a2dpConnected || outputRoute.contains("JBL Tune 770NC", true),
                     a2dpConnected = a2dpConnected,
                     headsetConnected = headsetConnected,
                     bleState = bleState,
@@ -734,6 +734,7 @@ class MainActivity : ComponentActivity() {
                     autoEqRules = autoEqRules.toMap(),
                     codecStatus = audioCodecStatus,
                     nativeBandCentersHz = audioEngine.nativeBandCenterFrequenciesHz(),
+                    lastCrashReport = lastCrashReport,
                     audioBypassed = audioBypassed,
                     bassPunch = bassPunch,
                     vocalPresence = vocalPresence,
@@ -753,6 +754,20 @@ class MainActivity : ComponentActivity() {
                     onScanClassicSdp = { scanClassicSdpUuids() },
                     onAirohaListener = { toggleAirohaRxListener() },
                     onCopyDump = { copyGattDump() },
+                    onCopyCrashTrace = {
+                        if (lastCrashReport.isNotBlank()) {
+                            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("VERLYN crash trace", lastCrashReport))
+                            Toast.makeText(this@MainActivity, "Crash trace copied", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onDismissCrashReport = {
+                        getSharedPreferences(VerlynApplication.CRASH_PREFS, Context.MODE_PRIVATE).edit()
+                            .remove(VerlynApplication.KEY_LAST_CRASH)
+                            .remove(VerlynApplication.KEY_CRASH_TIME)
+                            .apply()
+                        lastCrashReport = ""
+                    },
                     onGainChange = { index, value ->
                         if (index in 0..9) {
                             eqGains[index] = value.coerceIn(-12f, 12f)
@@ -915,7 +930,7 @@ class MainActivity : ComponentActivity() {
             )
         }
         checkPermissionsAndScan()
-        if (hasBluetoothPermissions()) startConnectionService()
+        if (hasBluetoothConnectPermission() && isJblA2dpRouteActiveNow()) startConnectionService()
         mainHandler.post(routePoll)
     }
 
@@ -929,8 +944,7 @@ class MainActivity : ComponentActivity() {
             addAction(BATTERY_ACTION)
             addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
         }
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_EXPORTED)
-        else registerReceiver(bluetoothStateReceiver, filter)
+        ContextCompat.registerReceiver(this, bluetoothStateReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
     }
 
     private fun registerRuntimeStateReceiver() {
@@ -941,12 +955,15 @@ class MainActivity : ComponentActivity() {
             addAction(VerlynSmartButtonService.ACTION_SMART_LOG)
             addAction(VerlynAudioRuntime.ACTION_STATUS)
         }
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(runtimeStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        else registerReceiver(runtimeStateReceiver, filter)
+        ContextCompat.registerReceiver(this, runtimeStateReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     private fun startConnectionService(action: String? = null) {
-        if (!hasBluetoothPermissions()) return
+        if (!hasBluetoothConnectPermission()) {
+            appStatus = "Bluetooth connect permission is required before starting the companion service."
+            return
+        }
+        if (action == null && !isJblA2dpRouteActiveNow()) return
         val serviceIntent = Intent(this, VerlynConnectionService::class.java).apply { if (action != null) setAction(action) }
         try {
             if (Build.VERSION.SDK_INT >= 26) ContextCompat.startForegroundService(this, serviceIntent) else startService(serviceIntent)
@@ -957,8 +974,7 @@ class MainActivity : ComponentActivity() {
 
     private fun registerSmartActionReceiver() {
         val filter = IntentFilter(VerlynSmartButtonService.ACTION_SMART_ACTION)
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(smartActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        else registerReceiver(smartActionReceiver, filter)
+        ContextCompat.registerReceiver(this, smartActionReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     private fun registerAudioEffectReceiver() {
@@ -966,9 +982,20 @@ class MainActivity : ComponentActivity() {
             addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
             addAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION)
         }
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(audioEffectSessionReceiver, filter, Context.RECEIVER_EXPORTED)
-        else registerReceiver(audioEffectSessionReceiver, filter)
+        ContextCompat.registerReceiver(this, audioEffectSessionReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
     }
+
+    private fun hasBluetoothConnectPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+
+    private fun isJblA2dpRouteActiveNow(): Boolean = runCatching {
+        val manager = audioManager ?: return@runCatching false
+        manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { output ->
+            output.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP &&
+                output.productName.toString().contains("JBL Tune 770NC", ignoreCase = true)
+        }
+    }.getOrDefault(false)
 
     private fun hasBluetoothPermissions(): Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
@@ -1080,37 +1107,47 @@ class MainActivity : ComponentActivity() {
         val manager = audioManager ?: return
         try {
             val outputs = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-            val relevant = outputs.filter {
-                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                    (Build.VERSION.SDK_INT >= 31 && it.type == AudioDeviceInfo.TYPE_BLE_HEADSET) ||
-                    (Build.VERSION.SDK_INT >= 31 && it.type == AudioDeviceInfo.TYPE_BLE_SPEAKER)
+            fun displayName(device: AudioDeviceInfo): String {
+                val product = device.productName.toString()
+                if (product.contains("JBL Tune 770NC", ignoreCase = true)) return "JBL Tune 770NC"
+                return when (device.type) {
+                    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Phone Speaker"
+                    AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "Earpiece"
+                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Wired Headphones"
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth Audio"
+                    else -> if (product.isNotBlank() && product != "unknown") product else "Audio Output"
+                }
             }
-            outputRoute = if (relevant.isEmpty()) {
-                val other = outputs.firstOrNull()
-                if (other == null) "No output route reported" else "Output: ${other.productName} (${audioTypeName(other.type)})"
-            } else relevant.joinToString(" · ") { "${it.productName} (${audioTypeName(it.type)})" }
-        } catch (_: Throwable) { outputRoute = "Output route unavailable on this Android build" }
-        val jblActive = outputRoute.contains("JBL Tune 770NC", true)
+            val active = outputs.filter { device ->
+                device.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                    device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                    (Build.VERSION.SDK_INT >= 31 && (device.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                        device.type == AudioDeviceInfo.TYPE_BLE_SPEAKER))
+            }
+            val display = (if (active.isNotEmpty()) active else outputs.toList())
+                .map(::displayName).distinct()
+            outputRoute = display.joinToString(" · ").ifBlank { "No output route reported" }
+        } catch (_: Throwable) {
+            outputRoute = "Output route unavailable on this Android build"
+        }
+        val jblActive = isJblA2dpRouteActiveNow()
+        a2dpConnected = jblActive
+        if (!jblActive) headsetConnected = false
         if (lastAppliedJblRoute != jblActive) {
             lastAppliedJblRoute = jblActive
             if (jblActive) restoreJblEqProfile()
             audioEngine.setRouteActive(jblActive)
             applyAudioSettings()
+            if (jblActive && hasBluetoothConnectPermission()) startConnectionService()
         }
-    }
-
-    private fun audioTypeName(type: Int): String = when (type) {
-        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth A2DP"
-        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth SCO"
-        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Phone speaker"
-        AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "Wired headphones"
-        AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Wired headset"
-        else -> "Output type $type"
     }
 
     @SuppressLint("MissingPermission")
     private fun readNativeHeadsetBattery(device: BluetoothDevice) {
-        val value = runCatching { device.javaClass.getMethod("getBatteryLevel").invoke(device) as? Int }.getOrNull()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || !hasBluetoothConnectPermission()) return
+        val value = runCatching {
+            device.javaClass.getMethod("getBatteryLevel").invoke(device) as? Int
+        }.getOrNull()
         if (value != null && value in 0..100) {
             serviceBatteryPercent = value
             serviceBatterySource = "Android Bluetooth device metadata"
@@ -1557,8 +1594,12 @@ class MainActivity : ComponentActivity() {
                 .build())
             .setSingleDevice(true)
             .build()
-        val manager = getSystemService(COMPANION_DEVICE_SERVICE) as CompanionDeviceManager
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !hasBluetoothConnectPermission()) {
+            Toast.makeText(this, "Companion association requires Android 12+ and Bluetooth permission.", Toast.LENGTH_LONG).show()
+            return
+        }
         runCatching {
+            val manager = getSystemService(COMPANION_DEVICE_SERVICE) as CompanionDeviceManager
             manager.associate(request, object : CompanionDeviceManager.Callback() {
                 override fun onDeviceFound(chooserLauncher: android.content.IntentSender) {
                     companionAssociationLauncher.launch(IntentSenderRequest.Builder(chooserLauncher).build())
@@ -1761,7 +1802,11 @@ class MainActivity : ComponentActivity() {
             else -> "Unavailable"
         }
         val dump = buildString {
-            appendLine("VERLYN 0.4.0 — COMPLETE AUDIO / BLUETOOTH DUMP")
+            appendLine("VERLYN 0.4.1 — COMPLETE AUDIO / BLUETOOTH DUMP")
+            appendLine()
+            appendLine("LAST CRASH REPORT")
+            appendLine(lastCrashReport.ifBlank { "No previous crash recorded" })
+            appendLine()
             appendLine("Device: " + (target?.let { safeDeviceName(it) } ?: "Not selected"))
             appendLine("Address: " + (target?.let { safeAddress(it) } ?: "Unavailable"))
             appendLine("BLE state: " + bleState)
@@ -2011,7 +2056,9 @@ class MainActivity : ComponentActivity() {
         refreshVolume(); refreshClassicState(); refreshOutputRoute()
         refreshQuickSetupStatus()
         if (adapter != null && hasBluetoothPermissions() && adapter?.isEnabled == true && !scanActive) {
-            loadPairedDevices(); startScan(); startConnectionService()
+            loadPairedDevices()
+            startScan()
+            if (hasBluetoothConnectPermission() && isJblA2dpRouteActiveNow()) startConnectionService()
         }
     }
 
