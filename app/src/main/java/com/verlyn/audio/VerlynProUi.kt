@@ -125,6 +125,7 @@ data class VerlynProUiActions(
     val onPreampChange: (Float) -> Unit,
     val onSavePreset: (String) -> Unit,
     val onRenamePreset: (String, String) -> Unit,
+    val onDuplicatePreset: (String, String) -> Unit = { _, _ -> },
     val onDeletePreset: (String) -> Unit,
     val onBalanceEnabledChange: (Boolean) -> Unit,
     val onBalanceChange: (Float) -> Unit,

@@ -757,6 +757,7 @@ class MainActivity : ComponentActivity() {
                     onPreampChange = { preamp = it.coerceIn(-12f, 12f); selectedPreset = "Custom"; mainHandler.removeCallbacks(audioApplyTask); mainHandler.postDelayed(audioApplyTask, 32L) },
                     onSavePreset = { saveCustomPreset(it) },
                     onRenamePreset = { oldName, newName -> renameCustomPreset(oldName, newName) },
+                    onDuplicatePreset = { oldName, newName -> duplicateCustomPreset(oldName, newName) },
                     onDeletePreset = { deleteCustomPreset(it) },
                     onBalanceEnabledChange = {
                         balanceEnabled = it
@@ -1567,6 +1568,24 @@ class MainActivity : ComponentActivity() {
                 Toast.makeText(this@MainActivity, "EQ preset saved", Toast.LENGTH_SHORT).show()
             } catch (error: Throwable) {
                 Toast.makeText(this@MainActivity, "Could not save preset: " + (error.message ?: "unknown"), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun duplicateCustomPreset(sourceName: String, newName: String) {
+        val source = customPresets.firstOrNull { it.name.equals(sourceName, ignoreCase = true) } ?: return
+        val clean = newName.trim().take(32)
+        if (clean.isBlank()) return
+        if (customPresets.any { it.name.equals(clean, ignoreCase = true) }) {
+            Toast.makeText(this, "A preset with that name already exists", Toast.LENGTH_SHORT).show()
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                EqPresetStore.save(this@MainActivity, source.copy(name = clean))
+                Toast.makeText(this@MainActivity, "Preset duplicated", Toast.LENGTH_SHORT).show()
+            } catch (error: Throwable) {
+                Toast.makeText(this@MainActivity, "Duplicate failed: " + (error.message ?: "unknown"), Toast.LENGTH_LONG).show()
             }
         }
     }

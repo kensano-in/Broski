@@ -218,6 +218,8 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
     var draft by remember(s.gains) { mutableStateOf(s.gains) }
     var showSave by remember { mutableStateOf(false) }
     var presetName by remember { mutableStateOf("My JBL Profile") }
+    var presetDialogMode by remember { mutableStateOf("save") }
+    var presetDialogSource by remember { mutableStateOf("") }
     val haptic = LocalHapticFeedback.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PremiumCard {
@@ -311,10 +313,27 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(preset.name, Modifier.weight(1f), fontSize = 11.sp)
                     TextButton(onClick = { a.onPreset(preset.name) }) { Text("APPLY") }
+                    TextButton(onClick = {
+                        presetDialogMode = "rename"
+                        presetDialogSource = preset.name
+                        presetName = preset.name
+                        showSave = true
+                    }) { Text("RENAME") }
+                    TextButton(onClick = {
+                        presetDialogMode = "duplicate"
+                        presetDialogSource = preset.name
+                        presetName = preset.name + " Copy"
+                        showSave = true
+                    }) { Text("DUPLICATE") }
                     TextButton(onClick = { a.onDeletePreset(preset.name) }) { Text("REMOVE") }
                 }
             }
-            OutlinedButton(onClick = { showSave = true }, modifier = Modifier.fillMaxWidth()) { Text("Save current profile") }
+            OutlinedButton(onClick = {
+                presetDialogMode = "save"
+                presetDialogSource = ""
+                presetName = "My JBL Profile"
+                showSave = true
+            }, modifier = Modifier.fillMaxWidth()) { Text("Save current profile") }
         }
         PremiumCard {
             Text("TONE & OUTPUT", fontWeight = FontWeight.Bold)
@@ -336,14 +355,26 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
     if (showSave) {
         AlertDialog(
             onDismissRequest = { showSave = false },
-            title = { Text("Save EQ profile") },
+            title = {
+                Text(when (presetDialogMode) {
+                    "rename" -> "Rename EQ profile"
+                    "duplicate" -> "Duplicate EQ profile"
+                    else -> "Save EQ profile"
+                })
+            },
             text = {
                 TextField(value = presetName, onValueChange = { presetName = it }, singleLine = true, label = { Text("Profile name") })
             },
             confirmButton = {
                 TextButton(onClick = {
                     val name = presetName.trim()
-                    if (name.isNotEmpty()) a.onSavePreset(name)
+                    if (name.isNotEmpty()) {
+                        when (presetDialogMode) {
+                            "rename" -> a.onRenamePreset(presetDialogSource, name)
+                            "duplicate" -> a.onDuplicatePreset(presetDialogSource, name)
+                            else -> a.onSavePreset(name)
+                        }
+                    }
                     showSave = false
                 }) { Text("SAVE") }
             },
