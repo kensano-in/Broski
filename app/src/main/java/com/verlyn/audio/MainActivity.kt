@@ -572,7 +572,9 @@ class MainActivity : ComponentActivity() {
                     serviceBatterySource = intent.getStringExtra(VerlynConnectionService.EXTRA_BATTERY_SOURCE) ?: serviceBatterySource
                     firmwareVersion = intent.getStringExtra(VerlynConnectionService.EXTRA_FIRMWARE)?.takeIf { it.isNotBlank() } ?: firmwareVersion
                     modelId = intent.getStringExtra(VerlynConnectionService.EXTRA_MODEL_ID)?.takeIf { it.isNotBlank() } ?: modelId
-                    audioSessionBindings = intent.getStringArrayListExtra(VerlynConnectionService.EXTRA_AUDIO_SESSIONS)?.toList() ?: audioSessionBindings
+                    val testBeatBinding = audioSessionBindings.filter { it.startsWith("Verlyn Test Beat ·") }
+                    val serviceBindings = intent.getStringArrayListExtra(VerlynConnectionService.EXTRA_AUDIO_SESSIONS)?.toList() ?: audioSessionBindings
+                    audioSessionBindings = (testBeatBinding + serviceBindings).distinct()
                     audioCodecStatus = intent.getStringExtra(VerlynConnectionService.EXTRA_CODEC_STATUS) ?: audioCodecStatus
                     rfcommState = intent.getStringExtra(VerlynConnectionService.EXTRA_LINK) ?: rfcommState
                     serviceNoiseMode = intent.getStringExtra(VerlynConnectionService.EXTRA_NOISE_MODE) ?: serviceNoiseMode
@@ -1539,7 +1541,10 @@ class MainActivity : ComponentActivity() {
         val label = when (uuid) {
             ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID -> "Fast Pair Message Stream"
             ClassicRfcommEngine.JBL_VENDOR_UUID -> "JBL Vendor SPP"
-            ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID -> "Airoha RACE UUID"
+            ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID -> "Airoha RACE RFCOMM UUID"
+            ClassicRfcommEngine.AIROHA_SDP_RACE_UUID -> "Airoha RACE SDP SPP"
+            ClassicRfcommEngine.HARMAN_CLASSIC_SPP_UUID -> "Harman Classic SPP"
+            ClassicRfcommEngine.HARMAN_VOICE_SPP_UUID -> "Harman Voice SPP"
             else -> "Manual RFCOMM endpoint"
         }
         rfcommState = "Requesting exclusive RFCOMM connection · " + label
@@ -1981,7 +1986,11 @@ class MainActivity : ComponentActivity() {
         val channelBalance = if (balanceEnabled) balance else 0f
         lifecycleScope.launch(Dispatchers.Default) {
             // No app-global session exists. Apply to attached positive media sessions only.
-            audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
+            if (globalMixFallbackEnabled && !audioEngine.hasGlobalMixEffect()) {
+                audioEngine.setGlobalMixFallback(true, gains, currentPreamp, enabled, limited, channelBalance)
+            } else {
+                audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
+            }
             if (sessionCompatibility) compatibilitySessions.filter { it > 0 }.forEach {
                 audioEngine.attachSession(it, "Unknown media app", gains, currentPreamp, enabled, limited, channelBalance)
             }
@@ -2047,8 +2056,8 @@ class MainActivity : ComponentActivity() {
         if (isPlaying) {
             val sessionId = Regex("Session\\s+(\\d+)").find(status)?.groupValues?.getOrNull(1)
             if (sessionId != null) {
-                audioSessionBindings = (audioSessionBindings.filterNot { it.startsWith("Verlyn Test Beat ·") } +
-                    "Verlyn Test Beat · Session " + sessionId).distinct()
+                audioSessionBindings = (listOf("Verlyn Test Beat · Session " + sessionId) +
+                    audioSessionBindings.filterNot { it.startsWith("Verlyn Test Beat ·") }).distinct()
             }
         } else if (status.contains("stopped", ignoreCase = true) || status.contains("failed", ignoreCase = true)) {
             audioSessionBindings = audioSessionBindings.filterNot { it.startsWith("Verlyn Test Beat ·") }
