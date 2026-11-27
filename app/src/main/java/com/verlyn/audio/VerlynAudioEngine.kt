@@ -20,13 +20,14 @@ class VerlynAudioEngine(
     private val equalizers = linkedMapOf<Int, Equalizer>()
     private val bassEffects = linkedMapOf<Int, BassBoost>()
     private val virtualizers = linkedMapOf<Int, Virtualizer>()
+    private val nativeLimiters = linkedMapOf<Int, DynamicsProcessing>()
     private val sessionPackages = linkedMapOf<Int, String>()
     private val engineNames = linkedMapOf<Int, String>()
     @Volatile private var bassBoostEnabled = false
     @Volatile private var spatialEnabled = false
     @Volatile private var routeActive = false
     @Volatile private var lastConfig = EffectConfig()
-    @Volatile private var preferredEngine = "dynamics"
+    @Volatile private var preferredEngine = "native"
 
     private data class EffectConfig(
         val gains: FloatArray = FloatArray(10),
@@ -50,7 +51,7 @@ class VerlynAudioEngine(
     @Synchronized
     fun setEngineMode(mode: String) {
         preferredEngine = if (mode.equals("native", true)) "native" else "dynamics"
-        val ids = (sessionPackages.keys + dynamics.keys + equalizers.keys).distinct()
+        val ids = (sessionPackages.keys + dynamics.keys + equalizers.keys + nativeLimiters.keys).distinct()
         ids.forEach { sessionId ->
             val packageName = sessionPackages[sessionId] ?: if (sessionId == 0) "Global Mix" else "Unknown app"
             attach(sessionId, packageName, lastConfig)
@@ -174,13 +175,28 @@ class VerlynAudioEngine(
         }.getOrDefault(false)
     }
 
+    /** Interpolates the 10-point UI curve at the device's actual native EQ band centres. */
+    private fun interpolatedGain(frequencyHz: Float, gains: FloatArray): Float {
+        val frequency = frequencyHz.coerceAtLeast(1f)
+        if (frequency <= BAND_FREQUENCIES.first()) return gains.getOrElse(0) { 0f }
+        if (frequency >= BAND_FREQUENCIES.last()) return gains.getOrElse(BAND_FREQUENCIES.lastIndex) { 0f }
+        val upper = BAND_FREQUENCIES.indexOfFirst { it >= frequency }.coerceIn(1, BAND_FREQUENCIES.lastIndex)
+        val lower = upper - 1
+        val lowHz = BAND_FREQUENCIES[lower]
+        val highHz = BAND_FREQUENCIES[upper]
+        val ratio = ((kotlin.math.ln(frequency.toDouble()) - kotlin.math.ln(lowHz.toDouble())) /
+            (kotlin.math.ln(highHz.toDouble()) - kotlin.math.ln(lowHz.toDouble()))).toFloat()
+        val lowGain = gains.getOrElse(lower) { 0f }
+        val highGain = gains.getOrElse(upper) { 0f }
+        return lowGain + (highGain - lowGain) * ratio
+    }
+
     private fun applyLegacyEq(effect: Equalizer, gains: FloatArray, enabled: Boolean) {
         val count = effect.numberOfBands.toInt()
         val range = effect.bandLevelRange
         for (band in 0 until count) {
             val frequency = effect.getCenterFreq(band.toShort()) / 1000f
-            val nearest = BAND_FREQUENCIES.indices.minByOrNull { kotlin.math.abs(BAND_FREQUENCIES[it] - frequency) } ?: 0
-            val level = (gains.getOrElse(nearest) { 0f } * 100f)
+            val level = ((if (enabled) interpolatedGain(frequency, gains) else 0f) * 100f)
                 .toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
             effect.setBandLevel(band.toShort(), level)
         }
@@ -251,7 +267,7 @@ class VerlynAudioEngine(
     @Synchronized
     fun setBassBoost(enabled: Boolean) {
         bassBoostEnabled = enabled
-        (dynamics.keys + equalizers.keys + bassEffects.keys).distinct().ifEmpty { listOf(0) }.forEach {
+        (sessionPackages.keys + dynamics.keys + equalizers.keys + bassEffects.keys).distinct().ifEmpty { listOf(0) }.forEach {
             applyAuxEffects(it)
         }
         onStatus(statusForEffects())
@@ -260,7 +276,7 @@ class VerlynAudioEngine(
     @Synchronized
     fun setSpatial(enabled: Boolean) {
         spatialEnabled = enabled
-        (dynamics.keys + equalizers.keys + virtualizers.keys).distinct().ifEmpty { listOf(0) }.forEach {
+        (sessionPackages.keys + dynamics.keys + equalizers.keys + virtualizers.keys).distinct().ifEmpty { listOf(0) }.forEach {
             applyAuxEffects(it)
         }
         onStatus(statusForEffects())
@@ -270,7 +286,7 @@ class VerlynAudioEngine(
         runCatching {
             val bass = bassEffects[sessionId] ?: BassBoost(0, sessionId).also { bassEffects[sessionId] = it }
             if (!bass.hasControl()) throw IllegalStateException("BassBoost hasControl=false")
-            if (bassBoostEnabled) bass.setStrength(900.toShort())
+            if (bassBoostEnabled) bass.setStrength(650.toShort())
             bass.enabled = bassBoostEnabled
             if (bass.enabled != bassBoostEnabled || !bass.hasControl()) throw IllegalStateException("BassBoost failed enabled/control check")
         }.onFailure {
@@ -278,11 +294,17 @@ class VerlynAudioEngine(
             onStatus("Session $sessionId · BassBoost unavailable: " + (it.message ?: "no control"))
         }
 
+        if (dynamics.containsKey(sessionId)) {
+            nativeLimiters.remove(sessionId)?.let { runCatching { it.release() } }
+        } else {
+            applyNativeLimiter(sessionId, lastConfig.limiterEnabled)
+        }
+
         if (spatialEnabled) {
             runCatching {
                 val virtualizer = virtualizers[sessionId] ?: Virtualizer(0, sessionId).also { virtualizers[sessionId] = it }
                 if (!virtualizer.hasControl()) throw IllegalStateException("Virtualizer hasControl=false")
-                virtualizer.setStrength(600.toShort())
+                virtualizer.setStrength(650.toShort())
                 virtualizer.enabled = true
                 if (!virtualizer.enabled || !virtualizer.hasControl()) throw IllegalStateException("Virtualizer failed enabled/control check")
             }.onFailure {
@@ -290,6 +312,37 @@ class VerlynAudioEngine(
                 onStatus("Session $sessionId · Virtualizer unavailable: " + (it.message ?: "no control"))
             }
         } else virtualizers.remove(sessionId)?.let { runCatching { it.release() } }
+    }
+
+    private fun applyNativeLimiter(sessionId: Int, enabled: Boolean) {
+        if (!enabled) {
+            nativeLimiters.remove(sessionId)?.let { runCatching { it.release() } }
+            return
+        }
+        runCatching {
+            val limiter = nativeLimiters[sessionId] ?: run {
+                val config = DynamicsProcessing.Config.Builder(
+                    DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
+                    2,
+                    false, 0,
+                    false, 0,
+                    false, 0,
+                    true
+                ).setLimiterAllChannelsTo(
+                    DynamicsProcessing.Limiter(true, true, 0, 10f, 100f, 20f, -1f, 0f)
+                ).build()
+                DynamicsProcessing(0, sessionId, config).also { nativeLimiters[sessionId] = it }
+            }
+            if (!limiter.hasControl()) throw IllegalStateException("native limiter hasControl=false")
+            limiter.enabled = true
+            if (!limiter.enabled || !limiter.hasControl()) {
+                throw IllegalStateException("native limiter enabled/control check failed")
+            }
+        }.onFailure { error ->
+            nativeLimiters.remove(sessionId)?.let { runCatching { it.release() } }
+            onStatus("Session $sessionId · native peak limiter unavailable: " +
+                (error.message ?: error.javaClass.simpleName))
+        }
     }
 
     @Synchronized
@@ -306,6 +359,7 @@ class VerlynAudioEngine(
         equalizers.remove(sessionId)?.let { runCatching { it.release() } }
         bassEffects.remove(sessionId)?.let { runCatching { it.release() } }
         virtualizers.remove(sessionId)?.let { runCatching { it.release() } }
+        nativeLimiters.remove(sessionId)?.let { runCatching { it.release() } }
         if (sessionId == 0) {
             sessionPackages.remove(sessionId)
             engineNames.remove(sessionId)
@@ -314,11 +368,12 @@ class VerlynAudioEngine(
 
     @Synchronized
     fun releaseAll() {
-        (dynamics.keys + equalizers.keys + bassEffects.keys + virtualizers.keys).distinct().forEach(::releaseSessionEffects)
+        (dynamics.keys + equalizers.keys + bassEffects.keys + virtualizers.keys + nativeLimiters.keys).distinct().forEach(::releaseSessionEffects)
         dynamics.clear()
         equalizers.clear()
         bassEffects.clear()
         virtualizers.clear()
+        nativeLimiters.clear()
         sessionPackages.clear()
         engineNames.clear()
         onStatus("No audio sessions bound")
@@ -351,8 +406,18 @@ class VerlynAudioEngine(
                 legacy != null -> runCatching { legacy.enabled }.getOrDefault(false)
                 else -> false
             }
+            val bass = bassEffects[id]
+            val virtualizer = virtualizers[id]
+            val limiter = dynamics[id] ?: nativeLimiters[id]
             packageName + " (Session " + id + ") · " + (engineNames[id] ?: "Unknown") +
-                " · hasControl=" + control + " · enabled=" + enabled
+                " · hasControl=" + control + " · enabled=" + enabled +
+                " · BassBoost(control=" + (bass?.let { runCatching { it.hasControl() }.getOrDefault(false) } ?: false) +
+                ", enabled=" + (bass?.let { runCatching { it.enabled }.getOrDefault(false) } ?: false) +
+                ", strength=" + (bass?.let { runCatching { it.roundedStrength.toInt() }.getOrDefault(0) } ?: 0) + ")" +
+                " · Virtualizer(control=" + (virtualizer?.let { runCatching { it.hasControl() }.getOrDefault(false) } ?: false) +
+                ", enabled=" + (virtualizer?.let { runCatching { it.enabled }.getOrDefault(false) } ?: false) + ")" +
+                " · PeakLimiter(control=" + (limiter?.let { runCatching { it.hasControl() }.getOrDefault(false) } ?: false) +
+                ", enabled=" + lastConfig.limiterEnabled + ")"
         }
     }
 
@@ -369,7 +434,14 @@ class VerlynAudioEngine(
             val enabled = dynamics[first]?.let { runCatching { it.enabled }.getOrDefault(false) }
                 ?: equalizers[first]?.let { runCatching { it.enabled }.getOrDefault(false) }
                 ?: false
-            return engine + " · " + name + " · Session " + first + " · control=" + hasControl + " · enabled=" + enabled
+            val bass = bassEffects[first]
+            val virtualizer = virtualizers[first]
+            val limiter = dynamics[first] ?: nativeLimiters[first]
+            return engine + " · " + name + " · Session " + first + " · control=" + hasControl + " · enabled=" + enabled +
+                " · BassBoost=" + (bass?.let { runCatching { it.hasControl() && it.enabled }.getOrDefault(false) } ?: false) +
+                " · Virtualizer=" + (virtualizer?.let { runCatching { it.hasControl() && it.enabled }.getOrDefault(false) } ?: false) +
+                " · LimiterControl=" + (limiter?.let { runCatching { it.hasControl() }.getOrDefault(false) } ?: false) +
+                " · LimiterEnabled=" + lastConfig.limiterEnabled
         }
         val global = dynamics[0]
         val legacy = equalizers[0]

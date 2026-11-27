@@ -143,7 +143,6 @@ class MainActivity : ComponentActivity() {
     private val rfcommCaptureLog = mutableStateListOf<String>()
     private val customPresets = mutableStateListOf<EqPreset>()
     private val smartTriggerActions = mutableStateMapOf<String, String>()
-    private lateinit var rfcommEngine: ClassicRfcommEngine
     private lateinit var voiceAnnouncer: VoiceAnnouncer
     private lateinit var eqTestPlayer: EqTestAudioPlayer
     private var rfcommState by mutableStateOf("Disconnected")
@@ -221,7 +220,9 @@ class MainActivity : ComponentActivity() {
     private var writeHexInput by mutableStateOf("")
     private var manualRfcommTargetUuid by mutableStateOf(ClassicRfcommEngine.JBL_VENDOR_UUID.toString())
     private var manualRfcommHex by mutableStateOf("")
-    private var engineMode by mutableStateOf("dynamics")
+    private var engineMode by mutableStateOf("native")
+    private var headsetGesturesEnabled by mutableStateOf(false)
+    private val headsetTriggerActions = mutableStateMapOf<String, String>()
     private var eqEnabled by mutableStateOf(true)
     private var limiterEnabled by mutableStateOf(true)
     private var sessionCompatibility by mutableStateOf(true)
@@ -607,40 +608,6 @@ class MainActivity : ComponentActivity() {
                 appendLog("EQ test: " + status)
             }
         }
-        rfcommEngine = ClassicRfcommEngine(
-            onStatus = { value -> runOnUiThread { rfcommState = value; appendLog("RFCOMM: " + value) } },
-            onPacket = { uuid, bytes ->
-                runOnUiThread {
-                    val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-                    val hex = bytes.toHexString()
-                    val line = "[" + time + "] UUID=" + uuid + " bytes=" + bytes.size + " HEX[" + hex + "]"
-                    rfcommCaptureLog.add(0, line)
-                    while (rfcommCaptureLog.size > 500) rfcommCaptureLog.removeAt(rfcommCaptureLog.lastIndex)
-                    appendLog("RFCOMM RX UUID=" + uuid + " bytes=" + bytes.size + " HEX[" + hex + "]")
-                }
-            },
-            onBattery = { levels ->
-                runOnUiThread {
-                    val known = levels.filter { it in 0..100 }
-                    headsetBatteryPercent = known.firstOrNull()
-                    headsetBatteryDetail = when {
-                        known.isEmpty() -> "Fast Pair battery event received · levels unknown"
-                        known.size == 1 -> "Fast Pair Message Stream · " + known.first() + "% reported"
-                        else -> "Fast Pair component levels · " + known.joinToString("% / ", postfix = "%")
-                    }
-                    known.firstOrNull()?.let { preferences.edit().putInt("headset_battery_percent", it).apply() }
-                    appendLog("Fast Pair battery event: " + known.joinToString(", "))
-                }
-            },
-            onFastPairInfo = { info ->
-                runOnUiThread {
-                    info.firmwareVersion?.let { firmwareVersion = it }
-                    info.modelId?.let { modelId = it }
-                    if (info.firmwareVersion != null) appendLog("Fast Pair firmware: " + info.firmwareVersion)
-                    if (info.modelId != null) appendLog("Fast Pair Model ID: " + info.modelId)
-                }
-            }
-        )
         audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
         handleAudioEffectPanelIntent(intent)
         refreshVolume()
@@ -708,6 +675,8 @@ class MainActivity : ComponentActivity() {
                     testAudioStatus = testAudioStatus,
                     smartKeyStatus = smartKeyStatus,
                     engineMode = engineMode,
+                    headsetGesturesEnabled = headsetGesturesEnabled,
+                    headsetTriggerActions = headsetTriggerActions.toMap(),
                     manualRfcommTargetUuid = manualRfcommTargetUuid,
                     manualRfcommHex = manualRfcommHex
                 ),
@@ -719,7 +688,7 @@ class MainActivity : ComponentActivity() {
                     onBleConnect = { connectBleHeadset() },
                     onBleDisconnect = { disconnectGatt() },
                     onRfcommConnect = { connectRfcommByUuid(it) },
-                    onRfcommDisconnect = { rfcommEngine.disconnect() },
+                    onRfcommDisconnect = { startConnectionService(VerlynConnectionService.ACTION_MANUAL_RFCOMM_DISCONNECT) },
                     onScanClassicSdp = { scanClassicSdpUuids() },
                     onAirohaListener = { toggleAirohaRxListener() },
                     onCopyDump = { copyGattDump() },
@@ -789,6 +758,15 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onPowerOffHeadset = { VerlynConnectionService.requestPowerOff(this@MainActivity) },
+                    onHeadsetGesturesEnabledChange = { enabled ->
+                        headsetGesturesEnabled = enabled
+                        preferences.edit().putBoolean("headset_earcup_gestures_enabled", enabled).apply()
+                        sendBroadcast(Intent(VerlynConnectionService.ACTION_AUX_CHANGED).setPackage(packageName))
+                    },
+                    onHeadsetTriggerActionChange = { key, action ->
+                        headsetTriggerActions[key] = action
+                        preferences.edit().putString(key, action).apply()
+                    },
                     onEngineModeChange = { mode ->
                         engineMode = if (mode == "native") "native" else "dynamics"
                         preferences.edit().putString("audio_engine_mode", engineMode).apply()
@@ -803,10 +781,17 @@ class MainActivity : ComponentActivity() {
                         when {
                             bytes == null || bytes.isEmpty() -> Toast.makeText(this@MainActivity, "Enter valid captured hex bytes", Toast.LENGTH_SHORT).show()
                             bytes.size > 512 -> Toast.makeText(this@MainActivity, "Maximum RFCOMM payload is 512 bytes", Toast.LENGTH_SHORT).show()
-                            rfcommEngine.connectedUuid() != runCatching { UUID.fromString(manualRfcommTargetUuid) }.getOrNull() ->
-                                Toast.makeText(this@MainActivity, "Connect the selected RFCOMM endpoint first", Toast.LENGTH_SHORT).show()
                             else -> {
-                                if (rfcommEngine.sendRaw(bytes)) appendLog("Manual RFCOMM hex sender queued ${bytes.size} byte(s)")
+                                val sendIntent = Intent(this@MainActivity, VerlynConnectionService::class.java)
+                                    .setAction(VerlynConnectionService.ACTION_MANUAL_RFCOMM_SEND)
+                                    .putExtra(VerlynConnectionService.EXTRA_MANUAL_RFCOMM_UUID, manualRfcommTargetUuid)
+                                    .putExtra(VerlynConnectionService.EXTRA_MANUAL_RFCOMM_BYTES, bytes)
+                                try {
+                                    ContextCompat.startForegroundService(this@MainActivity, sendIntent)
+                                    appendLog("Manual RFCOMM hex sender forwarded to the connection service · " + bytes.size + " byte(s)")
+                                } catch (error: Throwable) {
+                                    Toast.makeText(this@MainActivity, "RFCOMM send failed: " + (error.message ?: "service unavailable"), Toast.LENGTH_LONG).show()
+                                }
                             }
                         }
                     },
@@ -1366,34 +1351,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun connectFastPairRfcomm() {
-        if (!hasBluetoothPermissions()) { appStatus = "Bluetooth Connect permission is required for RFCOMM."; checkPermissionsAndScan(); return }
-        val device = pairedClassicJbl()
-        if (device == null) { appStatus = "Pair JBL Tune 770NC in Android Bluetooth settings first."; return }
-        connectRfcomm(device, ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID, "Google Fast Pair Message Stream")
+        connectRfcommByUuid(ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID.toString())
     }
 
     private fun connectRfcommByUuid(value: String) {
-        if (!hasBluetoothPermissions()) return
-        val device = pairedClassicJbl()
-        if (device == null) { rfcommState = "Paired Classic JBL Tune 770NC not found"; return }
-        val uuid = try { UUID.fromString(value) } catch (_: Throwable) { rfcommState = "Invalid RFCOMM UUID"; return }
+        if (!hasBluetoothPermissions()) {
+            appStatus = "Bluetooth Connect permission is required for RFCOMM."
+            checkPermissionsAndScan()
+            return
+        }
+        val uuid = runCatching { UUID.fromString(value) }.getOrNull()
+        if (uuid == null) {
+            rfcommState = "Invalid RFCOMM UUID"
+            return
+        }
         val label = when (uuid) {
-            ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID -> "Google Fast Pair Message Stream"
-            ClassicRfcommEngine.JBL_VENDOR_UUID -> "JBL vendor UUID (unverified)"
-            ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID -> "Custom / Airoha candidate UUID (unverified)"
-            else -> "Custom SDP endpoint"
+            ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID -> "Fast Pair Message Stream"
+            ClassicRfcommEngine.JBL_VENDOR_UUID -> "JBL Vendor SPP"
+            ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID -> "Airoha RACE UUID"
+            else -> "Manual RFCOMM endpoint"
         }
-        connectRfcomm(device, uuid, label)
-    }
-
-    private fun connectRfcomm(device: BluetoothDevice, uuid: UUID, label: String) {
-        try {
-            appendLog("RFCOMM connect request: " + label + " · " + uuid + " · " + safeAddress(device))
-            rfcommEngine.connect(device, uuid, label)
-        } catch (error: Throwable) {
-            rfcommState = "RFCOMM failed: " + (error.message ?: "unknown error")
-            appendLog(rfcommState)
-        }
+        rfcommState = "Requesting exclusive RFCOMM connection · " + label
+        appendLog("RFCOMM user connect request · " + label + " · " + uuid)
+        val connectIntent = Intent(this, VerlynConnectionService::class.java)
+            .setAction(VerlynConnectionService.ACTION_MANUAL_RFCOMM_CONNECT)
+            .putExtra(VerlynConnectionService.EXTRA_MANUAL_RFCOMM_UUID, uuid.toString())
+        runCatching { ContextCompat.startForegroundService(this, connectIntent) }
+            .onFailure {
+                rfcommState = "RFCOMM service failed · " + (it.message ?: "unavailable")
+                appendLog(rfcommState)
+            }
     }
 
     private fun connectBleHeadset() {
@@ -1410,6 +1397,15 @@ class MainActivity : ComponentActivity() {
             "trigger_volume_up_double" to "toggle_limiter"
         )
         slots.forEach { (key, defaultValue) -> smartTriggerActions[key] = preferences.getString(key, defaultValue) ?: defaultValue }
+        val headsetSlots = listOf(
+            VerlynConnectionService.HEADSET_DOWN_THREE to "speak_time",
+            VerlynConnectionService.HEADSET_UP_THREE to "speak_battery",
+            VerlynConnectionService.HEADSET_DOWN_UP to "cycle_eq"
+        )
+        headsetGesturesEnabled = preferences.getBoolean("headset_earcup_gestures_enabled", false)
+        headsetSlots.forEach { (key, defaultValue) ->
+            headsetTriggerActions[key] = preferences.getString(key, defaultValue) ?: defaultValue
+        }
         accessibilityEnabled = isSmartAccessibilityEnabled()
     }
 
@@ -1573,8 +1569,7 @@ class MainActivity : ComponentActivity() {
             else -> "Unavailable"
         }
         val dump = buildString {
-            appendLine("VERLYN 0.3.2 — COMPLETE AUDIO / BLUETOOTH DUMP")
-            appendLine("EQ engine mode: " + engineMode)
+            appendLine("VERLYN 0.3.3 — COMPLETE AUDIO / BLUETOOTH DUMP")
             appendLine("Device: " + (target?.let { safeDeviceName(it) } ?: "Not selected"))
             appendLine("Address: " + (target?.let { safeAddress(it) } ?: "Unavailable"))
             appendLine("BLE state: " + bleState)
@@ -1635,7 +1630,7 @@ class MainActivity : ComponentActivity() {
         }
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Verlyn diagnostic dump", dump))
-        Toast.makeText(this, "VERLYN 0.3.1 diagnostic dump copied", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "VERLYN 0.3.3 diagnostic dump copied", Toast.LENGTH_SHORT).show()
     }
 
     private fun updateSessionCompatibility(enabled: Boolean) {
@@ -1658,7 +1653,14 @@ class MainActivity : ComponentActivity() {
         limiterEnabled = preferences.getBoolean("limiter_enabled", true)
         selectedPreset = preferences.getString("preset", "Flat") ?: "Flat"
         sessionCompatibility = preferences.getBoolean("session_compatibility", true)
-        engineMode = preferences.getString("audio_engine_mode", "dynamics") ?: "dynamics"
+        val storedEngineMode = preferences.getString("audio_engine_mode", null)
+        val nativeDefaultMigrated = preferences.getBoolean("engine_mode_native_default_033", false)
+        engineMode = if (!nativeDefaultMigrated && storedEngineMode == "dynamics") "native"
+        else storedEngineMode ?: "native"
+        preferences.edit()
+            .putString("audio_engine_mode", engineMode)
+            .putBoolean("engine_mode_native_default_033", true)
+            .apply()
         clarityValue = preferences.getFloat("clarity", 0f).coerceIn(-6f, 6f)
         bassBoostEnabled = preferences.getBoolean("bass_boost_enabled", false)
         spatialEnabled = preferences.getBoolean("spatial_enabled", false)
@@ -1725,6 +1727,8 @@ class MainActivity : ComponentActivity() {
                 "Extreme Bass" -> floatArrayOf(8f, 7f, 5f, 2f, 0f, -1f, -1f, 0f, 2f, 3f)
                 "Vocal" -> floatArrayOf(-2f, -2f, -1f, 2f, 4f, 4f, 3f, 1f, 0f, -1f)
                 "Jazz" -> floatArrayOf(3f, 2f, 1f, 2f, -1f, -2f, 0f, 2f, 3f, 2f)
+                "Podcast" -> floatArrayOf(-3f, -2f, -1f, 1f, 3f, 4f, 3f, 2f, 0f, -1f)
+                "Gaming" -> floatArrayOf(3f, 2f, 0f, -1f, 0f, 2f, 4f, 4f, 2f, 0f)
                 else -> FloatArray(10) { 0f }
             }
             values.forEachIndexed { index, value -> eqGains[index] = value }
@@ -1746,7 +1750,10 @@ class MainActivity : ComponentActivity() {
         val ceiling = if (limiterEnabled) (maxMusicVolume * 0.75f).toInt().coerceAtLeast(1) else maxMusicVolume
         val next = value.coerceIn(0, ceiling)
         musicVolume = next
-        try { audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0) } catch (_: SecurityException) {}
+        try {
+            VerlynVolumeChangeGuard.markProgrammaticChange()
+            audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0)
+        } catch (_: SecurityException) {}
     }
 
     private fun sendMediaKey(keyCode: Int) {
@@ -1822,7 +1829,6 @@ class MainActivity : ComponentActivity() {
         try { unregisterReceiver(smartActionReceiver) } catch (_: Throwable) {}
         try { unregisterReceiver(runtimeStateReceiver) } catch (_: Throwable) {}
         mainHandler.removeCallbacks(audioApplyTask)
-        try { rfcommEngine.shutdown() } catch (_: Throwable) {}
         try { eqTestPlayer.shutdown() } catch (_: Throwable) {}
         try { voiceAnnouncer.shutdown() } catch (_: Throwable) {}
         try { a2dpProxy?.let { (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter?.closeProfileProxy(BluetoothProfile.A2DP, it) } } catch (_: Throwable) {}

@@ -1,21 +1,24 @@
 package com.verlyn.audio
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class AirohaRaceState(
     val ready: Boolean,
@@ -25,25 +28,44 @@ data class AirohaRaceState(
     val modeCode: Int? = null
 )
 
-class AirohaRaceClient(private val onLog: (String) -> Unit) {
+/** One at-a-time RACE transport. Each endpoint gets a hard four-second connect watchdog. */
+class AirohaRaceClient(
+    private val bluetoothAdapter: BluetoothAdapter?,
+    private val onLog: (String) -> Unit
+) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val commandMutex = Mutex()
+    private val operationInFlight = AtomicBoolean(false)
     @Volatile private var activeSocket: BluetoothSocket? = null
 
+    fun isBusy(): Boolean = operationInFlight.get()
+
+    fun cancelActive() {
+        closeSocket(activeSocket)
+    }
+
     fun probe(device: BluetoothDevice, callback: (AirohaRaceState) -> Unit) {
+        if (!operationInFlight.compareAndSet(false, true)) {
+            callback(AirohaRaceState(false, "Unknown", "RACE busy · wait for the current RFCOMM operation"))
+            return
+        }
         scope.launch {
-            val state = runCatching {
-                commandMutex.withLock {
-                    val connected = openVerifiedSocket(device)
-                    try {
-                        AirohaRaceState(true, modeName(connected.modeCode), "RACE status received · " + connected.endpoint,
-                            connected.endpoint, connected.modeCode)
-                    } finally {
-                        closeSocket(connected.socket)
-                    }
+            val state = try {
+                val connected = openVerifiedSocket(device)
+                try {
+                    AirohaRaceState(
+                        true,
+                        modeName(connected.modeCode),
+                        "RACE status received · " + connected.endpoint,
+                        connected.endpoint,
+                        connected.modeCode
+                    )
+                } finally {
+                    closeSocket(connected.socket)
                 }
-            }.getOrElse {
-                AirohaRaceState(false, "Unknown", "RACE status unavailable · " + (it.message ?: "no response"))
+            } catch (error: Throwable) {
+                failureState("RACE status unavailable", error)
+            } finally {
+                operationInFlight.set(false)
             }
             callback(state)
         }
@@ -55,44 +77,59 @@ class AirohaRaceClient(private val onLog: (String) -> Unit) {
             callback(AirohaRaceState(false, "Unknown", "Unsupported noise-control action"))
             return
         }
+        if (!operationInFlight.compareAndSet(false, true)) {
+            callback(AirohaRaceState(false, "Unknown", "RACE busy · wait for the current RFCOMM operation"))
+            return
+        }
         scope.launch {
-            val state = runCatching {
-                commandMutex.withLock {
-                    val connected = openVerifiedSocket(device)
-                    try {
-                        writeRequest(connected.output, SET_NOISE_OPCODE, command.payload)
-                        val confirmation = awaitResponse(connected.input, GET_NOISE_OPCODE, RESPONSE_TIMEOUT_MS)
-                        val code = parseModeCode(confirmation.body)
-                            ?: throw IllegalStateException("Malformed 0x0901 mode response")
-                        if (code != command.expectedCode) {
-                            throw IllegalStateException("Headset reported " + modeName(code) + " instead of " + requestedMode)
-                        }
-                        AirohaRaceState(true, modeName(code), requestedMode + " confirmed by headset · " + connected.endpoint,
-                            connected.endpoint, code)
-                    } finally {
-                        closeSocket(connected.socket)
+            val state = try {
+                val connected = openVerifiedSocket(device)
+                try {
+                    writeRequest(connected.output, SET_NOISE_OPCODE, command.payload)
+                    val confirmation = awaitResponse(connected.input, GET_NOISE_OPCODE, RESPONSE_TIMEOUT_MS)
+                    val code = parseModeCode(confirmation.body)
+                        ?: throw IllegalStateException("Malformed 0x0901 mode response")
+                    if (code != command.expectedCode) {
+                        throw IllegalStateException("Headset reported " + modeName(code) + " instead of " + requestedMode)
                     }
+                    AirohaRaceState(
+                        true,
+                        modeName(code),
+                        requestedMode + " confirmed by headset · " + connected.endpoint,
+                        connected.endpoint,
+                        code
+                    )
+                } finally {
+                    closeSocket(connected.socket)
                 }
-            }.getOrElse {
-                AirohaRaceState(false, "Unknown", requestedMode + " failed · " + (it.message ?: "no response"))
+            } catch (error: Throwable) {
+                failureState(requestedMode + " failed", error)
+            } finally {
+                operationInFlight.set(false)
             }
             callback(state)
         }
     }
 
     fun powerOff(device: BluetoothDevice, callback: (String) -> Unit) {
+        if (!operationInFlight.compareAndSet(false, true)) {
+            callback("RACE busy · wait for the current RFCOMM operation")
+            return
+        }
         scope.launch {
-            val message = runCatching {
-                commandMutex.withLock {
-                    val connected = openVerifiedSocket(device)
-                    try {
-                        writeRequest(connected.output, POWER_OFF_OPCODE, byteArrayOf(0x18, 0x00))
-                        "Power-off command sent · " + connected.endpoint
-                    } finally {
-                        closeSocket(connected.socket)
-                    }
+            val message = try {
+                val connected = openVerifiedSocket(device)
+                try {
+                    writeRequest(connected.output, POWER_OFF_OPCODE, byteArrayOf(0x18, 0x00))
+                    "Power-off command sent · " + connected.endpoint
+                } finally {
+                    closeSocket(connected.socket)
                 }
-            }.getOrElse { "Power-off failed · " + (it.message ?: "no response") }
+            } catch (error: Throwable) {
+                failureDetail("Power-off failed", error)
+            } finally {
+                operationInFlight.set(false)
+            }
             callback(message)
         }
     }
@@ -116,35 +153,67 @@ class AirohaRaceClient(private val onLog: (String) -> Unit) {
             try {
                 onLog("RACE CONNECT attempt · " + candidate.label)
                 socket = candidate.create()
-                socket.connect()
+                connectWithTimeout(socket, candidate.label)
                 activeSocket = socket
-                onLog(if (candidate.label.contains("channel 21", true)) "RFCOMM Ch 21 connected · " + candidate.label else "RFCOMM socket connected · " + candidate.label)
+                onLog(if (candidate.label.contains("channel 21", true))
+                    "RFCOMM Ch 21 connected · " + candidate.label
+                else "RFCOMM socket connected · " + candidate.label)
                 val input = socket.inputStream
                 val output = socket.outputStream
                 writeRequest(output, GET_NOISE_OPCODE, byteArrayOf(0x05, 0x00))
                 val frame = awaitResponse(input, GET_NOISE_OPCODE, RESPONSE_TIMEOUT_MS)
                 val code = parseModeCode(frame.body)
                     ?: throw IllegalStateException("Invalid 0x0901 response body " + frame.body.hex())
-                onLog("RACE STATE · mode=" + modeName(code) + " code=0x" + code.toString(16).uppercase() + " endpoint=" + candidate.label)
+                onLog(
+                    "RACE STATE · mode=" + modeName(code) +
+                        " code=0x" + code.toString(16).uppercase() +
+                        " endpoint=" + candidate.label
+                )
                 return ConnectedRaceSocket(socket, input, output, candidate.label, code)
             } catch (error: Throwable) {
                 lastError = error
-                onLog("RACE CONNECT/GET failed · " + candidate.label + " · " + error.javaClass.simpleName + ": " + (error.message ?: "no response"))
+                onLog(
+                    "RACE CONNECT/GET failed · " + candidate.label + " · " +
+                        error.javaClass.simpleName + ": " + (error.message ?: "no response")
+                )
                 closeSocket(socket)
             }
         }
-        throw IllegalStateException("No RACE endpoint returned a valid 0x0901 status", lastError)
+        val cause = lastError?.javaClass?.simpleName + ": " + (lastError?.message ?: "no response")
+        throw IllegalStateException(
+            "RFCOMM blocked — Force Stop the official JBL Headphones app and retry · All endpoints failed · " + cause,
+            lastError
+        )
     }
 
     @SuppressLint("MissingPermission")
     private fun socketCandidates(device: BluetoothDevice): List<SocketCandidate> = listOf(
+        SocketCandidate("RFCOMM channel 21 · insecure") { createChannelSocket(device, true) },
+        SocketCandidate("RFCOMM channel 21 · secure") { createChannelSocket(device, false) },
         SocketCandidate("RACE UUID " + RACE_UUID + " · secure") { device.createRfcommSocketToServiceRecord(RACE_UUID) },
         SocketCandidate("RACE UUID " + RACE_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(RACE_UUID) },
-        SocketCandidate("PRIM UUID " + PRIM_UUID + " · secure") { device.createRfcommSocketToServiceRecord(PRIM_UUID) },
-        SocketCandidate("PRIM UUID " + PRIM_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(PRIM_UUID) },
-        SocketCandidate("RFCOMM channel 21 · secure reflection") { createChannelSocket(device, false) },
-        SocketCandidate("RFCOMM channel 21 · insecure reflection") { createChannelSocket(device, true) }
+        SocketCandidate("JBL Vendor SPP " + JBL_VENDOR_UUID + " · secure") { device.createRfcommSocketToServiceRecord(JBL_VENDOR_UUID) },
+        SocketCandidate("JBL Vendor SPP " + JBL_VENDOR_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(JBL_VENDOR_UUID) }
     )
+
+    @SuppressLint("MissingPermission")
+    private suspend fun connectWithTimeout(socket: BluetoothSocket, label: String) {
+        runCatching { bluetoothAdapter?.cancelDiscovery() }
+        val connectJob = CoroutineScope(Dispatchers.IO).async { socket.connect() }
+        var connected = false
+        try {
+            connected = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+                connectJob.await()
+                true
+            } ?: false
+            if (!connected) throw IOException("RFCOMM connect timeout after " + CONNECT_TIMEOUT_MS + "ms · " + label)
+        } finally {
+            if (!connected) {
+                runCatching { socket.close() }
+                connectJob.cancel()
+            }
+        }
+    }
 
     @SuppressLint("MissingPermission")
     private fun createChannelSocket(device: BluetoothDevice, insecure: Boolean): BluetoothSocket {
@@ -153,7 +222,7 @@ class AirohaRaceClient(private val onLog: (String) -> Unit) {
         return method.invoke(device, RFCOMM_CHANNEL) as BluetoothSocket
     }
 
-    private suspend fun writeRequest(output: OutputStream, opcode: Int, payload: ByteArray) {
+    private fun writeRequest(output: OutputStream, opcode: Int, payload: ByteArray) {
         val frame = buildRequest(opcode, payload)
         onLog("RACE TX op=0x" + opcode.toString(16).uppercase().padStart(4, '0') + " · " + frame.hex())
         output.write(frame)
@@ -209,8 +278,11 @@ class AirohaRaceClient(private val onLog: (String) -> Unit) {
                 val opcode = u16le(bytes, cursor + 4)
                 val body = bytes.copyOfRange(cursor + 6, frameEnd)
                 cursor = frameEnd
-                onLog("RACE FRAME type=0x" + type.toString(16).uppercase() +
-                    " op=0x" + opcode.toString(16).uppercase().padStart(4, '0') + " body=" + body.hex())
+                onLog(
+                    "RACE FRAME type=0x" + type.toString(16).uppercase() +
+                        " op=0x" + opcode.toString(16).uppercase().padStart(4, '0') +
+                        " body=" + body.hex()
+                )
                 if ((type == RESPONSE_TYPE || type == INDICATION_TYPE) && opcode == expectedOpcode) {
                     matched = RaceFrame(type, opcode, body)
                     break
@@ -224,10 +296,8 @@ class AirohaRaceClient(private val onLog: (String) -> Unit) {
         throw IllegalStateException("RACE response timeout for 0x" + expectedOpcode.toString(16))
     }
 
-    private fun parseModeCode(body: ByteArray): Int? {
-        if (body.size < 4) return null
-        return body[3].toInt() and 0xFF
-    }
+    private fun parseModeCode(body: ByteArray): Int? =
+        if (body.size < 4) null else body[3].toInt() and 0xFF
 
     private fun modeName(code: Int): String = when (code) {
         0x00 -> "Off"
@@ -237,13 +307,24 @@ class AirohaRaceClient(private val onLog: (String) -> Unit) {
         else -> "Unknown (0x" + code.toString(16).uppercase() + ")"
     }
 
+    private fun failureState(prefix: String, error: Throwable): AirohaRaceState =
+        AirohaRaceState(false, "Unknown", failureDetail(prefix, error))
+
+    private fun failureDetail(prefix: String, error: Throwable): String {
+        val cause = error.cause ?: error
+        val message = cause.message ?: cause.javaClass.simpleName
+        onLog(prefix + " · " + cause.javaClass.simpleName + ": " + message)
+        return if (message.contains("RFCOMM blocked", true)) message
+        else "RFCOMM blocked — Force Stop the official JBL Headphones app and retry · " + prefix + " · " + cause.javaClass.simpleName + ": " + message
+    }
+
     private fun closeSocket(socket: BluetoothSocket?) {
         if (activeSocket === socket) activeSocket = null
         runCatching { socket?.close() }
     }
 
     fun shutdown() {
-        runCatching { activeSocket?.close() }
+        closeSocket(activeSocket)
         scope.cancel()
     }
 
@@ -259,12 +340,13 @@ class AirohaRaceClient(private val onLog: (String) -> Unit) {
         private const val MAX_FRAME_BODY = 2048
         private const val MAX_PENDING_BYTES = 4096
         private const val RFCOMM_CHANNEL = 21
+        private const val CONNECT_TIMEOUT_MS = 4_000L
         private const val RESPONSE_TIMEOUT_MS = 3_000L
         private const val GET_NOISE_OPCODE = 0x0901
         private const val SET_NOISE_OPCODE = 0x0E06
         private const val POWER_OFF_OPCODE = 0x1101
         private val RACE_UUID = UUID.fromString("00000000-0000-0000-0099-aabbccddeeff")
-        private val PRIM_UUID = UUID.fromString("5052494d-2dab-0341-6972-6f6861424c45")
+        private val JBL_VENDOR_UUID = UUID.fromString("0000ff01-0000-1000-8000-00805f9b34ff")
         private val modeCommands = mapOf(
             "ANC" to ModeCommand(byteArrayOf(0x00, 0x0A, 0x01), 0x01),
             "Ambient Aware" to ModeCommand(byteArrayOf(0x00, 0x0A, 0x0A), 0x0A),

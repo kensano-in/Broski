@@ -241,7 +241,7 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
         }
         PremiumCard {
             Text("SOUND PROFILES", fontWeight = FontWeight.Bold)
-            listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz").chunked(3).forEach { row ->
+            listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming").chunked(3).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     row.forEach { name ->
                         val selected = s.selectedPreset.equals(name, true)
@@ -358,8 +358,38 @@ private fun SmartTab(s: VerlynProUiState, a: VerlynProUiActions, pick: (String) 
             }
         }
         PremiumCard {
-            Text("GESTURE ASSIGNMENTS", fontWeight = FontWeight.Bold)
-            Text("Works with phone volume keys while screen is on or locked.", color = VMuted, fontSize = 9.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("HEADSET EARCUP GESTURES", fontWeight = FontWeight.Bold)
+                    Text("JBL absolute-volume events · active on JBL A2DP", color = VMuted, fontSize = 9.sp)
+                }
+                Switch(s.headsetGesturesEnabled, a.onHeadsetGesturesEnabledChange)
+            }
+            Text(
+                if (s.headsetGesturesEnabled) "Listening while JBL A2DP is connected" else "Disabled · enable to use headset volume buttons",
+                color = if (s.headsetGesturesEnabled) VBlueLight else VMuted,
+                fontSize = 9.sp
+            )
+            HeadsetGestureAssignment(
+                "3× quick Vol− · Speak exact time",
+                s.headsetTriggerActions["headset_volume_down_3"] ?: "speak_time",
+                { a.onHeadsetTriggerActionChange("headset_volume_down_3", it) }
+            )
+            HeadsetGestureAssignment(
+                "3× quick Vol+ · Speak phone & headset battery",
+                s.headsetTriggerActions["headset_volume_up_3"] ?: "speak_battery",
+                { a.onHeadsetTriggerActionChange("headset_volume_up_3", it) }
+            )
+            HeadsetGestureAssignment(
+                "Vol− → Vol+ · Cycle EQ preset",
+                s.headsetTriggerActions["headset_volume_down_up"] ?: "cycle_eq",
+                { a.onHeadsetTriggerActionChange("headset_volume_down_up", it) }
+            )
+            Text("The starting music volume is restored before a matched gesture runs.", color = VMuted, fontSize = 9.sp)
+        }
+        PremiumCard {
+            Text("PHONE VOLUME-KEY GESTURES", fontWeight = FontWeight.Bold)
+            Text("Uses phone volume keys while screen is on or locked.", color = VMuted, fontSize = 9.sp)
             Text(s.smartKeyStatus, color = VBlueLight, fontSize = 9.sp)
             slots.forEach { slot ->
                 Row(Modifier.fillMaxWidth().clickable { pick(slot.first) }.padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -370,6 +400,45 @@ private fun SmartTab(s: VerlynProUiState, a: VerlynProUiActions, pick: (String) 
                     Text("CHANGE  ›", color = VBlueLight, fontSize = 9.sp)
                 }
                 HorizontalDivider(color = VBorder)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeadsetGestureAssignment(
+    title: String,
+    selectedAction: String,
+    onActionChange: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = listOf(
+        "speak_time" to "Speak exact current time",
+        "speak_battery" to "Speak phone & headset battery",
+        "cycle_eq" to "Cycle EQ preset",
+        "toggle_limiter" to "Toggle peak limiter",
+        "toggle_bass_boost" to "Toggle Bass Boost",
+        "media_next" to "Media · Next",
+        "media_previous" to "Media · Previous",
+        "media_play_pause" to "Media · Play / Pause",
+        "disabled" to "Disabled"
+    )
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(title, color = VWhite, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+        Box {
+            OutlinedButton(onClick = { expanded = true }) {
+                Text(options.firstOrNull { it.first == selectedAction }?.second ?: "Choose action")
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option.second) },
+                        onClick = {
+                            expanded = false
+                            onActionChange(option.first)
+                        }
+                    )
+                }
             }
         }
     }

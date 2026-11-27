@@ -90,7 +90,9 @@ data class VerlynProUiState(
     val ttsStatus: String = "TTS initializing",
     val testAudioStatus: String = "",
     val smartKeyStatus: String = "Waiting for volume-key input",
-    val engineMode: String = "dynamics",
+    val engineMode: String = "native",
+    val headsetGesturesEnabled: Boolean = false,
+    val headsetTriggerActions: Map<String, String> = emptyMap(),
     val manualRfcommTargetUuid: String = ClassicRfcommEngine.JBL_VENDOR_UUID.toString(),
     val manualRfcommHex: String = ""
 )
@@ -130,7 +132,9 @@ data class VerlynProUiActions(
     val onEngineModeChange: (String) -> Unit = {},
     val onManualRfcommTargetChange: (String) -> Unit = {},
     val onManualRfcommHexChange: (String) -> Unit = {},
-    val onSendRfcommHex: () -> Unit = {}
+    val onSendRfcommHex: () -> Unit = {},
+    val onHeadsetGesturesEnabledChange: (Boolean) -> Unit = {},
+    val onHeadsetTriggerActionChange: (String, String) -> Unit = {}
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)
@@ -150,7 +154,7 @@ private val smartActionOptions = listOf(
     "media_play_pause" to "Media · Play / Pause",
     "disabled" to "Disabled"
 )
-private val builtInPresetNames = listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz")
+private val builtInPresetNames = listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming")
 private val eqLabels = listOf("32", "64", "125", "250", "500", "1k", "2k", "4k", "8k", "16k")
 
 @Composable

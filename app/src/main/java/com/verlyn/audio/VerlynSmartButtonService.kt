@@ -70,11 +70,25 @@ class VerlynSmartButtonService : AccessibilityService() {
             return true
         }
         if (event.action == KeyEvent.ACTION_UP) {
-            downAt.remove(key)
+            val pressedAt = downAt.remove(key) ?: System.currentTimeMillis()
+            val heldMs = System.currentTimeMillis() - pressedAt
             longTasks.remove(key)?.let { handler.removeCallbacks(it) }
             logKey("Key UP · " + label)
             if (longPressTriggered.remove(key)) {
                 lastTap.remove(key)
+                return true
+            }
+            if (heldMs >= 500L) {
+                lastTap.remove(key)
+                pendingShort.remove(key)?.let { handler.removeCallbacks(it) }
+                logKey("Long hold consumed at ACTION_UP · " + heldMs + "ms")
+                runAction(slotFor(key, "long"))
+                return true
+            }
+            if (heldMs >= 450L) {
+                lastTap.remove(key)
+                pendingShort.remove(key)?.let { handler.removeCallbacks(it) }
+                logKey("Volume replay suppressed · hold duration " + heldMs + "ms")
                 return true
             }
             val now = System.currentTimeMillis()
@@ -102,6 +116,7 @@ class VerlynSmartButtonService : AccessibilityService() {
 
     private fun replayVolumeStep(key: Int) {
         val direction = if (key == KeyEvent.KEYCODE_VOLUME_UP) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
+        VerlynVolumeChangeGuard.markProgrammaticChange()
         runCatching { audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI) }
             .onFailure { logKey("Volume replay failed · " + (it.message ?: "unknown")) }
     }
@@ -127,7 +142,7 @@ class VerlynSmartButtonService : AccessibilityService() {
             }
             "cycle_eq" -> {
                 val custom = (prefs.getString("saved_preset_names", "") ?: "").split("\n").filter { it.isNotBlank() }
-                val names = (listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz") + custom).distinct()
+                val names = (listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming") + custom).distinct()
                 val current = prefs.getString("preset", "Flat") ?: "Flat"
                 val next = names[(names.indexOf(current).coerceAtLeast(-1) + 1) % names.size]
                 prefs.edit().putString("preset", next).apply()

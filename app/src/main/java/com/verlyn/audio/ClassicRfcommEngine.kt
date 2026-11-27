@@ -1,15 +1,19 @@
 package com.verlyn.audio
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.UUID
@@ -25,7 +29,8 @@ class ClassicRfcommEngine(
     private val onStatus: (String) -> Unit,
     private val onPacket: (UUID, ByteArray) -> Unit,
     private val onBattery: (List<Int>) -> Unit,
-    private val onFastPairInfo: (FastPairInfo) -> Unit = {}
+    private val onFastPairInfo: (FastPairInfo) -> Unit = {},
+    private val bluetoothAdapter: BluetoothAdapter? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val generation = AtomicInteger(0)
@@ -51,11 +56,19 @@ class ClassicRfcommEngine(
                 candidate = withContext(Dispatchers.IO) {
                     val secure = device.createRfcommSocketToServiceRecord(uuid)
                     try {
-                        secure.connect()
+                        connectSocketWithTimeout(secure, "secure " + uuid)
                         secure
                     } catch (secureError: Throwable) {
                         runCatching { secure.close() }
-                        device.createInsecureRfcommSocketToServiceRecord(uuid).also { it.connect() }
+                        onStatus("RFCOMM secure connect failed · " + (secureError.message ?: secureError.javaClass.simpleName) + " · trying insecure")
+                        val insecure = device.createInsecureRfcommSocketToServiceRecord(uuid)
+                        try {
+                            connectSocketWithTimeout(insecure, "insecure " + uuid)
+                            insecure
+                        } catch (insecureError: Throwable) {
+                            runCatching { insecure.close() }
+                            throw insecureError
+                        }
                     }
                 }
                 val connected = candidate ?: error("RFCOMM socket creation failed")
@@ -81,6 +94,25 @@ class ClassicRfcommEngine(
                     if (!failed && peerClosed) onStatus("Remote closed RFCOMM stream (EOF -1)")
                     else if (!failed) onStatus("Disconnected")
                 }
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun connectSocketWithTimeout(candidate: BluetoothSocket, label: String) {
+        runCatching { bluetoothAdapter?.cancelDiscovery() }
+        val connectJob = CoroutineScope(Dispatchers.IO).async { candidate.connect() }
+        var connected = false
+        try {
+            connected = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+                connectJob.await()
+                true
+            } ?: false
+            if (!connected) throw IOException("RFCOMM connect timeout after " + CONNECT_TIMEOUT_MS + "ms · " + label)
+        } finally {
+            if (!connected) {
+                runCatching { candidate.close() }
+                connectJob.cancel()
             }
         }
     }
@@ -218,6 +250,7 @@ class ClassicRfcommEngine(
     }
 
     companion object {
+        private const val CONNECT_TIMEOUT_MS = 4_000L
         val FAST_PAIR_MESSAGE_STREAM_UUID: UUID = UUID.fromString("df21fe2c-2515-4fdb-8886-f12c4d67927c")
         val JBL_VENDOR_UUID: UUID = UUID.fromString("0000ff01-0000-1000-8000-00805f9b34ff")
         val AIROHA_RFCOMM_CANDIDATE_UUID: UUID = UUID.fromString("00000000-0000-0000-0099-aabbccddeeff")
