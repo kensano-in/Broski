@@ -33,8 +33,8 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private val VBlack = Color(0xFF000000)
-private val VZinc = Color(0xFF141417)
-private val VZinc2 = Color(0xFF202024)
+private val VZinc = Color(0xFF111318)
+private val VZinc2 = Color(0xFF1C222C)
 private val VBlue = Color(0xFF2563EB)
 private val VMuted = Color(0xFFA1A1AA)
 private val VWhite = Color(0xFFF4F4F5)
@@ -152,7 +152,8 @@ data class VerlynProUiActions(
     val onEqBypassChange: (Boolean) -> Unit = {},
     val onMbcTuningChange: (String, Float) -> Unit = { _, _ -> },
     val onBassStrengthChange: (Float) -> Unit = {},
-    val onSpatialStrengthChange: (Float) -> Unit = {}
+    val onSpatialStrengthChange: (Float) -> Unit = {},
+    val onFindHeadsetPing: () -> Unit = {}
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)

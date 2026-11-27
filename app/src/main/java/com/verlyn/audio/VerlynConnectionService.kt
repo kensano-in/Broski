@@ -64,6 +64,8 @@ class VerlynConnectionService : Service() {
     private var sleepTimerEndsAt = 0L
     private var sleepTimerStartVolume = 0
     private var sleepTimerTask: Runnable? = null
+    private var pingAudioTrack: android.media.AudioTrack? = null
+    private var pingStopTask: Runnable? = null
     private val commandTapWindowMs = 380L
     private val commandWindowTimeout = Runnable { onCommandWindowTimeout() }
     private var a2dpProxy: BluetoothA2dp? = null
@@ -257,7 +259,7 @@ class VerlynConnectionService : Service() {
         }
         val isOperationalAction = data?.action in setOf(
             ACTION_COMPANION_APPEARED, ACTION_COMMAND_ASSIST, ACTION_COMMAND_BRIEFING,
-            ACTION_COMMAND_NEXT_EQ, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
+            ACTION_COMMAND_NEXT_EQ, ACTION_FIND_HEADSET_PING, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
             ACTION_POWER_OFF_HEADSET, ACTION_MANUAL_RFCOMM_CONNECT,
             ACTION_MANUAL_RFCOMM_SEND
         )
@@ -326,6 +328,7 @@ class VerlynConnectionService : Service() {
                 runConfiguredCommand("command_center_long_hold", "speak_full_briefing")
             }
             ACTION_COMMAND_NEXT_EQ -> cyclePresetFromNotification()
+            ACTION_FIND_HEADSET_PING -> playFindHeadsetPing()
             ACTION_COMPANION_APPEARED -> {
                 appendRaceLog("Companion presence · JBL Tune 770NC detected")
                 ensureTarget()?.let { handleConnected(it) }
@@ -950,6 +953,79 @@ class VerlynConnectionService : Service() {
         sendBroadcast(intent)
     }
 
+    private fun playFindHeadsetPing() {
+        if (!isJblA2dpRouteActive()) {
+            appendRaceLog("FIND HEADSET · ping skipped because JBL A2DP is not connected")
+            return
+        }
+        pingStopTask?.let { main.removeCallbacks(it) }
+        pingAudioTrack?.let { old -> runCatching { old.stop(); old.release() } }
+        pingAudioTrack = null
+        val sampleRate = 48_000
+        val frameCount = (sampleRate * 1.95f).toInt()
+        val samples = ShortArray(frameCount * 2)
+        val pulseDuration = 0.48
+        val cycleDuration = 0.65
+        for (frame in 0 until frameCount) {
+            val time = frame.toDouble() / sampleRate
+            val pulseTime = time % cycleDuration
+            var sample = 0.toShort()
+            if (pulseTime < pulseDuration) {
+                val progress = (pulseTime / pulseDuration).coerceIn(0.0, 1.0)
+                val frequency = 620.0 + 980.0 * progress
+                val phase = 2.0 * Math.PI * (620.0 * pulseTime +
+                    (980.0 * pulseTime * pulseTime) / (2.0 * pulseDuration))
+                val attack = (pulseTime / 0.018).coerceIn(0.0, 1.0)
+                val release = ((pulseDuration - pulseTime) / 0.085).coerceIn(0.0, 1.0)
+                val envelope = minOf(attack, release) * 0.22
+                sample = (kotlin.math.sin(phase) * envelope * Short.MAX_VALUE).toInt().toShort()
+            }
+            samples[frame * 2] = sample
+            samples[frame * 2 + 1] = sample
+        }
+        runCatching {
+            val attributes = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+            val format = android.media.AudioFormat.Builder()
+                .setSampleRate(sampleRate)
+                .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_STEREO)
+                .build()
+            val track = android.media.AudioTrack.Builder()
+                .setAudioAttributes(attributes)
+                .setAudioFormat(format)
+                .setTransferMode(android.media.AudioTrack.MODE_STATIC)
+                .setBufferSizeInBytes(samples.size * 2)
+                .build()
+            if (track.state != android.media.AudioTrack.STATE_INITIALIZED) {
+                track.release()
+                throw IllegalStateException("AudioTrack failed to initialize")
+            }
+            val written = track.write(samples, 0, samples.size)
+            if (written <= 0) {
+                track.release()
+                throw IllegalStateException("AudioTrack rejected the ping waveform")
+            }
+            track.setVolume(0.78f)
+            pingAudioTrack = track
+            track.play()
+            val stop = Runnable {
+                pingAudioTrack?.let { active -> runCatching { active.pause(); active.flush(); active.release() } }
+                pingAudioTrack = null
+                pingStopTask = null
+            }
+            pingStopTask = stop
+            main.postDelayed(stop, 2_150L)
+            appendRaceLog("FIND HEADSET · three rising sine chirps sent to the active A2DP media route")
+        }.onFailure {
+            pingAudioTrack?.let { runCatching { it.release() } }
+            pingAudioTrack = null
+            appendRaceLog("FIND HEADSET · ping failed · " + (it.message ?: it.javaClass.simpleName))
+        }
+    }
+
     private fun dispatchMediaKey(keyCode: Int) {
         audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keyCode))
         audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, keyCode))
@@ -1114,6 +1190,9 @@ class VerlynConnectionService : Service() {
         stopped.set(true)
         main.removeCallbacksAndMessages(null)
         sleepTimerTask?.let { main.removeCallbacks(it) }
+        pingStopTask?.let { main.removeCallbacks(it) }
+        pingAudioTrack?.let { runCatching { it.stop(); it.release() } }
+        pingAudioTrack = null
         runCatching { unregisterReceiver(bluetoothReceiver) }
         runCatching { unregisterReceiver(audioSessionReceiver) }
         runCatching { unregisterReceiver(auxiliaryReceiver) }
@@ -1134,6 +1213,7 @@ class VerlynConnectionService : Service() {
         const val ACTION_COMMAND_ASSIST = "com.verlyn.audio.COMMAND_ASSIST"
         const val ACTION_COMMAND_BRIEFING = "com.verlyn.audio.COMMAND_BRIEFING"
         const val ACTION_COMMAND_NEXT_EQ = "com.verlyn.audio.COMMAND_NEXT_EQ"
+        const val ACTION_FIND_HEADSET_PING = "com.verlyn.audio.FIND_HEADSET_PING"
         const val ACTION_COMPANION_APPEARED = "com.verlyn.audio.COMPANION_APPEARED"
         const val ACTION_COMPANION_DISAPPEARED = "com.verlyn.audio.COMPANION_DISAPPEARED"
         const val ACTION_PACKET = "com.verlyn.audio.RFCOMM_PACKET"

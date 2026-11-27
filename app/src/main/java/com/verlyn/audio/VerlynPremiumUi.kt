@@ -41,7 +41,7 @@ import kotlin.math.roundToInt
 private val VBlack = Color(0xFF000000)
 private val VCard = Color(0xFF111318)
 private val VBorder = Color(0xFF1F2430)
-private val VBlue = Color(0xFF3B82F6)
+private val VBlue = Color(0xFF2563EB)
 private val VBlueLight = Color(0xFF60A5FA)
 private val VWhite = Color(0xFFF8FAFC)
 private val VMuted = Color(0xFF8E98A8)
@@ -175,6 +175,9 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = a.onConnectHeadset, Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = VBlue)) { Text("Connect") }
                 OutlinedButton(onClick = a.onDisconnectHeadset, Modifier.weight(1f)) { Text("Disconnect") }
+            }
+            OutlinedButton(onClick = a.onFindHeadsetPing, enabled = s.audioConnected, modifier = Modifier.fillMaxWidth()) {
+                Text("FIND MY HEADSET · PLAY PING")
             }
         }
         PremiumCard {

@@ -811,6 +811,12 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onPowerOffHeadset = { VerlynConnectionService.requestPowerOff(this@MainActivity) },
+                    onFindHeadsetPing = {
+                        val pingIntent = Intent(this@MainActivity, VerlynConnectionService::class.java)
+                            .setAction(VerlynConnectionService.ACTION_FIND_HEADSET_PING)
+                        runCatching { ContextCompat.startForegroundService(this@MainActivity, pingIntent) }
+                            .onFailure { Toast.makeText(this@MainActivity, "Headset ping failed: " + (it.message ?: "service unavailable"), Toast.LENGTH_LONG).show() }
+                    },
                     onHeadsetGesturesEnabledChange = { _ ->
                         headsetGesturesEnabled = false
                         preferences.edit().putBoolean("headset_earcup_gestures_enabled", false).apply()
@@ -847,8 +853,6 @@ class MainActivity : ComponentActivity() {
                             .putFloat("mbc_bass_punch", bassPunch)
                             .putFloat("mbc_vocal_presence", vocalPresence)
                             .putFloat("mbc_treble_air", trebleAir)
-            .putInt("bass_boost_strength", bassBoostStrength.toInt())
-            .putInt("spatial_strength", spatialStrength.toInt())
                             .apply()
                         audioEngine.setMbcTuning(bassPunch, vocalPresence, trebleAir)
                     },
