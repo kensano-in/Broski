@@ -10,7 +10,7 @@ import android.media.audiofx.Equalizer
 import android.media.audiofx.Virtualizer
 import android.os.Build
 
-/** Binds actual AudioEffect instances to media app sessions; session 0 is only a fallback. */
+/** Binds Android AudioEffects only to live media sessions; session 0 is deliberately never used. */
 class VerlynAudioEngine(
     context: Context,
     private val onStatus: (String) -> Unit
@@ -49,9 +49,10 @@ class VerlynAudioEngine(
 
     @Synchronized
     fun attachGlobal(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
+        // Kept as a compatibility entry point for older callers. Android session 0 is not
+        // a valid startup target on many OEM audio stacks, so never construct an effect here.
         lastConfig = EffectConfig(gains.copyOf(), preamp, eqEnabled, limiterEnabled, balance)
-        sessionPackages[0] = "Global Mix"
-        attach(0, "Global Mix", lastConfig)
+        onStatus("Standby (Waiting for Media Session)")
     }
 
     @Synchronized
@@ -68,12 +69,13 @@ class VerlynAudioEngine(
     fun currentEngineMode(): String = preferredEngine
 
     @Synchronized
-    fun nativeBandCenterFrequenciesHz(): List<Int> {
-        val equalizer = equalizers.entries.firstOrNull { it.key != 0 }?.value ?: equalizers[0] ?: return emptyList()
-        return (0 until equalizer.numberOfBands.toInt()).map { band ->
-            (equalizer.getCenterFreq(band.toShort()).toInt() / 1000).coerceAtLeast(1)
+    fun nativeBandCenterFrequenciesHz(): List<Int> = runCatching {
+        val equalizer = equalizers.entries.firstOrNull { it.key > 0 }?.value ?: return emptyList()
+        val count = equalizer.numberOfBands.toInt().coerceIn(0, 32)
+        (0 until count).mapNotNull { band ->
+            runCatching { (equalizer.getCenterFreq(band.toShort()).toInt() / 1000).coerceAtLeast(1) }.getOrNull()
         }
-    }
+    }.getOrDefault(emptyList())
 
     @Synchronized
     fun attachSession(
@@ -93,12 +95,14 @@ class VerlynAudioEngine(
 
     @Synchronized
     private fun attach(sessionId: Int, packageName: String, config: EffectConfig) {
+        if (sessionId <= 0) {
+            onStatus("Standby (Waiting for Media Session)")
+            return
+        }
         releaseSessionEffects(sessionId)
         if (preferredEngine == "dynamics" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            try {
-                val preEqInUse = true
-                val mbcInUse = true
-                val limiterInUse = true
+            var candidate: DynamicsProcessing? = null
+            val effect = runCatching {
                 val preEq = buildEq(config.gains, config.eqEnabled)
                 preEq.setEnabled(true)
                 val postEq = buildEq(FloatArray(BAND_FREQUENCIES.size), true)
@@ -106,15 +110,13 @@ class VerlynAudioEngine(
                 val limiter = DynamicsProcessing.Limiter(
                     true, config.limiterEnabled, 0, 10f, 100f, 20f, -1f, 0f
                 )
-                // The old configuration set both EQ blocks to false and enabled MBC instead.
-                // That constructed a running but effectively flat EQ chain.
                 val builder = DynamicsProcessing.Config.Builder(
                     DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
                     2,
-                    preEqInUse, BAND_FREQUENCIES.size,
-                    mbcInUse, 3,
                     true, BAND_FREQUENCIES.size,
-                    limiterInUse
+                    true, 3,
+                    true, BAND_FREQUENCIES.size,
+                    true
                 )
                     .setInputGainAllChannelsTo(effectiveInputPreamp(config))
                     .setPreEqAllChannelsTo(preEq)
@@ -122,28 +124,35 @@ class VerlynAudioEngine(
                     .setPostEqAllChannelsTo(postEq)
                     .setLimiterAllChannelsTo(limiter)
 
-                val effect = DynamicsProcessing(0, sessionId, builder.build())
-                applyBalance(effect, effectiveInputPreamp(config), config.balance)
-                if (!effect.hasControl()) {
-                    effect.release()
-                    throw IllegalStateException("DynamicsProcessing hasControl=false")
+                DynamicsProcessing(0, sessionId, builder.build()).also { created ->
+                    candidate = created
+                    applyBalance(created, effectiveInputPreamp(config), config.balance)
+                    check(created.hasControl()) { "DynamicsProcessing hasControl=false" }
+                    created.enabled = !bypassed
+                    check(created.enabled == !bypassed && created.hasControl()) {
+                        "DynamicsProcessing failed its enabled/control check"
+                    }
                 }
-                effect.enabled = !bypassed
-                if (effect.enabled != !bypassed || !effect.hasControl()) {
-                    effect.release()
-                    throw IllegalStateException("DynamicsProcessing failed its enabled/control check")
-                }
+            }.onFailure { error ->
+                candidate?.let { effectToRelease -> runCatching { effectToRelease.release() } }
+                onStatus("Session $sessionId · DynamicsProcessing rejected: " +
+                    (error.message ?: error.javaClass.simpleName))
+            }.getOrNull()
+
+            if (effect != null) {
                 dynamics[sessionId] = effect
                 engineNames[sessionId] = "DynamicsProcessing"
                 applyAuxEffects(sessionId)
                 onStatus(statusForEffects())
                 return
-            } catch (error: Throwable) {
-                onStatus("Session $sessionId · DynamicsProcessing rejected: " + (error.message ?: error.javaClass.simpleName))
             }
         }
-        if (attachLegacy(sessionId, config)) onStatus(statusForEffects())
-        else onStatus("Session $sessionId · no controllable Equalizer/BassBoost effect")
+        if (attachLegacy(sessionId, config)) {
+            onStatus(statusForEffects())
+        } else {
+            engineNames[sessionId] = "Standby"
+            onStatus("Session $sessionId · Android audio effects unavailable")
+        }
     }
 
     private fun buildEq(gains: FloatArray, enabled: Boolean): DynamicsProcessing.Eq {
@@ -221,15 +230,18 @@ class VerlynAudioEngine(
     }
 
     private fun applyLegacyEq(effect: Equalizer, gains: FloatArray, enabled: Boolean) {
-        val count = effect.numberOfBands.toInt()
-        val range = effect.bandLevelRange
-        for (band in 0 until count) {
-            val frequency = effect.getCenterFreq(band.toShort()) / 1000f
-            val level = ((if (enabled) interpolatedGain(frequency, gains) else 0f) * 100f)
-                .toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
-            effect.setBandLevel(band.toShort(), level)
-        }
-        effect.enabled = enabled
+        runCatching {
+            val count = effect.numberOfBands.toInt().coerceIn(0, 32)
+            val range = effect.bandLevelRange
+            if (count == 0 || range.size < 2) throw IllegalStateException("Native Equalizer exposes no usable bands")
+            for (band in 0 until count) {
+                val frequency = runCatching { effect.getCenterFreq(band.toShort()).toInt() / 1000f }.getOrDefault(1000f)
+                val level = ((if (enabled) interpolatedGain(frequency, gains) else 0f) * 100f)
+                    .toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
+                effect.setBandLevel(band.toShort(), level)
+            }
+            effect.enabled = enabled
+        }.getOrThrow()
     }
 
     @Synchronized
@@ -327,9 +339,7 @@ class VerlynAudioEngine(
     @Synchronized
     fun setBassBoost(enabled: Boolean) {
         bassBoostEnabled = enabled
-        (sessionPackages.keys + dynamics.keys + equalizers.keys + bassEffects.keys).distinct().ifEmpty { listOf(0) }.forEach {
-            applyAuxEffects(it)
-        }
+        activeEffectSessionIds().forEach(::applyAuxEffects)
         onStatus(statusForEffects())
     }
 
@@ -348,18 +358,21 @@ class VerlynAudioEngine(
     }
 
     private fun activeEffectSessionIds(): List<Int> =
-        (sessionPackages.keys + dynamics.keys + equalizers.keys + bassEffects.keys + virtualizers.keys).distinct().ifEmpty { listOf(0) }
+        (sessionPackages.keys + dynamics.keys + equalizers.keys + bassEffects.keys + virtualizers.keys)
+            .filter { it > 0 }.distinct()
 
     @Synchronized
     fun setSpatial(enabled: Boolean) {
         spatialEnabled = enabled
-        (sessionPackages.keys + dynamics.keys + equalizers.keys + virtualizers.keys).distinct().ifEmpty { listOf(0) }.forEach {
-            applyAuxEffects(it)
-        }
+        activeEffectSessionIds().forEach(::applyAuxEffects)
         onStatus(statusForEffects())
     }
 
     private fun applyAuxEffects(sessionId: Int) {
+        if (sessionId <= 0) {
+            onStatus("Standby (Waiting for Media Session)")
+            return
+        }
         runCatching {
             val bass = bassEffects[sessionId] ?: BassBoost(0, sessionId).also { bassEffects[sessionId] = it }
             if (!bass.hasControl()) throw IllegalStateException("BassBoost hasControl=false")
@@ -393,6 +406,7 @@ class VerlynAudioEngine(
     }
 
     private fun applyNativeLimiter(sessionId: Int, enabled: Boolean) {
+        if (sessionId <= 0) return
         if (!enabled) {
             nativeLimiters.remove(sessionId)?.let { runCatching { it.release() } }
             return

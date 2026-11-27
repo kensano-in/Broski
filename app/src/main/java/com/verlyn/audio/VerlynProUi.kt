@@ -107,7 +107,8 @@ data class VerlynProUiState(
     val bassBoostStrength: Float = 65f,
     val spatialStrength: Float = 65f,
     val autoEqRules: Map<String, String> = emptyMap(),
-    val codecStatus: String = "Unavailable"
+    val codecStatus: String = "Unavailable",
+    val lastCrashReport: String = ""
 )
 
 data class VerlynProUiActions(
@@ -158,7 +159,9 @@ data class VerlynProUiActions(
     val onBassStrengthChange: (Float) -> Unit = {},
     val onSpatialStrengthChange: (Float) -> Unit = {},
     val onFindHeadsetPing: () -> Unit = {},
-    val onAutoEqRuleChange: (String, String) -> Unit = { _, _ -> }
+    val onAutoEqRuleChange: (String, String) -> Unit = { _, _ -> },
+    val onCopyCrashTrace: () -> Unit = {},
+    val onDismissCrashReport: () -> Unit = {}
 )
 
 private val builtInPresetNames = listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming")
@@ -597,15 +600,18 @@ private fun ProCard(content: @Composable ColumnScope.() -> Unit) {
 
 @Composable
 private fun SplineEqualizer(gains: List<Float>, onGainChange: (Int, Float) -> Unit, interactive: Boolean, modifier: Modifier = Modifier) {
-    Canvas(modifier.pointerInput(interactive) {
+    Canvas(modifier.pointerInput(interactive, gains.size) {
         if (interactive) {
             detectDragGestures { change, _ ->
-                val x = change.position.x.coerceIn(0f, size.width.toFloat())
-                val y = change.position.y.coerceIn(0f, size.height.toFloat())
-                val index = ((x / size.width) * (gains.size - 1)).roundToInt().coerceIn(0, gains.lastIndex)
-                val db = (12f - (y / size.height) * 24f).coerceIn(-12f, 12f)
-                onGainChange(index, db)
-                change.consume()
+                if (gains.isNotEmpty() && size.width > 0f && size.height > 0f) {
+                    val x = change.position.x.coerceIn(0f, size.width.toFloat())
+                    val y = change.position.y.coerceIn(0f, size.height.toFloat())
+                    val lastIndex = gains.lastIndex.coerceAtLeast(0)
+                    val index = ((x / size.width) * lastIndex).roundToInt().coerceIn(0, lastIndex)
+                    val db = (12f - (y / size.height) * 24f).coerceIn(-12f, 12f)
+                    onGainChange(index, db)
+                    change.consume()
+                }
             }
         }
     }) {
