@@ -670,7 +670,7 @@ class MainActivity : ComponentActivity() {
             VerlynPremiumApp(
                 state = VerlynProUiState(
                     selectedTab = selectedTab,
-                    audioConnected = a2dpConnected || outputRoute.contains("JBL Tune 770NC", true),
+                    audioConnected = a2dpConnected,
                     a2dpConnected = a2dpConnected,
                     headsetConnected = headsetConnected,
                     bleState = bleState,
