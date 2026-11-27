@@ -104,7 +104,8 @@ data class VerlynProUiState(
     val vocalPresence: Float = 0f,
     val trebleAir: Float = 0f,
     val bassBoostStrength: Float = 65f,
-    val spatialStrength: Float = 65f
+    val spatialStrength: Float = 65f,
+    val autoEqRules: Map<String, String> = emptyMap()
 )
 
 data class VerlynProUiActions(
@@ -154,7 +155,6 @@ data class VerlynProUiActions(
     val onBassStrengthChange: (Float) -> Unit = {},
     val onSpatialStrengthChange: (Float) -> Unit = {},
     val onFindHeadsetPing: () -> Unit = {},
-    val autoEqRules: Map<String, String> = emptyMap(),
     val onAutoEqRuleChange: (String, String) -> Unit = { _, _ -> }
 )
 
