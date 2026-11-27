@@ -254,5 +254,8 @@ class ClassicRfcommEngine(
         val FAST_PAIR_MESSAGE_STREAM_UUID: UUID = UUID.fromString("df21fe2c-2515-4fdb-8886-f12c4d67927c")
         val JBL_VENDOR_UUID: UUID = UUID.fromString("0000ff01-0000-1000-8000-00805f9b34ff")
         val AIROHA_RFCOMM_CANDIDATE_UUID: UUID = UUID.fromString("00000000-0000-0000-0099-aabbccddeeff")
+        val AIROHA_SDP_RACE_UUID: UUID = UUID.fromString("5052494d-2dab-0341-6972-6f6861424c45")
+        val HARMAN_CLASSIC_SPP_UUID: UUID = UUID.fromString("f8d1fbe4-7966-4334-8024-ff96c9330e15")
+        val HARMAN_VOICE_SPP_UUID: UUID = UUID.fromString("81c2e72a-0591-443e-a1ff-05f988593351")
     }
 }

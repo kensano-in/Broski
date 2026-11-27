@@ -64,24 +64,34 @@ class EqTestAudioPlayer(
                 currentSessionId = sessionId
                 engine.attachSession(sessionId, "VERLYN Test EQ", gains, preamp, eqEnabled, limiterEnabled, balance)
                 createdTrack.play()
-                onStatus("Test audio playing · Session " + sessionId)
+                onStatus("Verlyn Test Beat · Session " + sessionId + " · playing")
                 val blockFrames = 1_024
                 var frameOffset = 0L
                 val samples = ShortArray(blockFrames * 2)
+                val beatFrames = sampleRate / 2
                 while (currentCoroutineContext().isActive) {
                     val frames = blockFrames
                     for (i in 0 until frames) {
                         val frame = frameOffset + i.toLong()
                         val t = frame.toDouble() / sampleRate.toDouble()
-                        val envelope = if (frame < sampleRate / 10) (frame.toDouble() / (sampleRate / 10)).coerceIn(0.0, 1.0) else 1.0
-                        val bass = sin(2.0 * PI * 55.0 * t) * 0.10
-                        val lowMid = sin(2.0 * PI * 110.0 * t) * 0.045
-                        val chord = sin(2.0 * PI * 220.0 * t) * 0.035 +
-                            sin(2.0 * PI * 277.18 * t) * 0.025 +
-                            sin(2.0 * PI * 329.63 * t) * 0.025 +
-                            sin(2.0 * PI * 440.0 * t) * 0.018
-                        val left = ((bass + lowMid + chord) * envelope * 0.72).coerceIn(-0.8, 0.8)
-                        val right = ((bass + lowMid + chord) * envelope * 0.72).coerceIn(-0.8, 0.8)
+                        val fadeIn = (frame.toDouble() / (sampleRate / 20)).coerceIn(0.0, 1.0)
+                        val beatPhase = (frame % beatFrames).toDouble() / sampleRate.toDouble()
+                        val kick = sin(2.0 * PI * (48.0 - 8.0 * beatPhase) * t) *
+                            kotlin.math.exp(-beatPhase * 15.0) * 0.22
+                        val subBass = sin(2.0 * PI * 55.0 * t) * 0.105 +
+                            sin(2.0 * PI * 82.41 * t) * 0.045 +
+                            sin(2.0 * PI * 110.0 * t) * 0.035
+                        val leftChord = sin(2.0 * PI * 220.0 * t) * 0.045 +
+                            sin(2.0 * PI * 277.18 * t) * 0.034 +
+                            sin(2.0 * PI * 329.63 * t) * 0.029 +
+                            sin(2.0 * PI * 440.0 * t) * 0.021
+                        val rightChord = sin(2.0 * PI * 246.94 * t) * 0.045 +
+                            sin(2.0 * PI * 311.13 * t) * 0.034 +
+                            sin(2.0 * PI * 369.99 * t) * 0.029 +
+                            sin(2.0 * PI * 493.88 * t) * 0.021
+                        val stereoMotion = sin(2.0 * PI * 0.25 * t) * 0.018
+                        val left = ((kick + subBass + leftChord + stereoMotion) * fadeIn * 0.82).coerceIn(-0.85, 0.85)
+                        val right = ((kick + subBass + rightChord - stereoMotion) * fadeIn * 0.82).coerceIn(-0.85, 0.85)
                         samples[i * 2] = (left * Short.MAX_VALUE).toInt().toShort()
                         samples[i * 2 + 1] = (right * Short.MAX_VALUE).toInt().toShort()
                     }
@@ -90,7 +100,7 @@ class EqTestAudioPlayer(
                     frameOffset += frames.toLong()
                 }
                 createdTrack.stop()
-                onStatus("Test Beat stopped · Session " + sessionId)
+                onStatus("Verlyn Test Beat stopped · Session " + sessionId)
             } catch (_: CancellationException) {
                 // Normal stop request; the finally block releases the session and track.
             } catch (error: Throwable) {

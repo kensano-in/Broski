@@ -111,6 +111,63 @@ class AirohaRaceClient(
         }
     }
 
+    fun probeAllRfcommUuids(device: BluetoothDevice, callback: (String) -> Unit) {
+        if (!operationInFlight.compareAndSet(false, true)) {
+            callback("RFCOMM probe busy · wait for the current operation")
+            return
+        }
+        scope.launch {
+            val results = mutableListOf<String>()
+            val accepted = mutableListOf<UUID>()
+            try {
+                for (uuid in RFCOMM_PROBE_UUIDS) {
+                    val deadline = SystemClock.elapsedRealtime() + RFCOMM_PROBE_TIMEOUT_MS
+                    var acceptedSocket = false
+                    var lastError: Throwable? = null
+                    onLog("RFCOMM UUID PROBE · " + uuid + " · budget=" + RFCOMM_PROBE_TIMEOUT_MS + "ms")
+                    val factories = listOf(
+                        "secure" to { device.createRfcommSocketToServiceRecord(uuid) },
+                        "insecure" to { device.createInsecureRfcommSocketToServiceRecord(uuid) }
+                    )
+                    for ((transport, createSocket) in factories) {
+                        val remaining = deadline - SystemClock.elapsedRealtime()
+                        if (remaining <= 0L) break
+                        var socket: BluetoothSocket? = null
+                        try {
+                            socket = createSocket()
+                            activeSocket = socket
+                            connectWithTimeout(socket, "probe " + uuid + " " + transport, remaining)
+                            acceptedSocket = true
+                            break
+                        } catch (error: Throwable) {
+                            lastError = error
+                        } finally {
+                            if (!acceptedSocket) closeSocket(socket)
+                        }
+                    }
+                    if (acceptedSocket) {
+                        accepted.add(uuid)
+                        results.add(uuid.toString() + " · SOCKET ACCEPTED")
+                        onLog("RFCOMM UUID PROBE ACCEPTED · " + uuid)
+                        closeSocket(activeSocket)
+                    } else {
+                        val detail = lastError?.message ?: lastError?.javaClass?.simpleName ?: "timeout"
+                        results.add(uuid.toString() + " · no socket (" + detail.take(90) + ")")
+                        onLog("RFCOMM UUID PROBE failed · " + uuid + " · " + detail)
+                    }
+                }
+            } finally {
+                operationInFlight.set(false)
+            }
+            val summary = if (accepted.isEmpty()) {
+                "Probe complete · no UUID accepted a socket\n" + results.joinToString("\n")
+            } else {
+                "Probe complete · accepted: " + accepted.joinToString(", ") + "\n" + results.joinToString("\n")
+            }
+            callback(summary)
+        }
+    }
+
     fun powerOff(device: BluetoothDevice, callback: (String) -> Unit) {
         if (!operationInFlight.compareAndSet(false, true)) {
             callback("RACE busy · wait for the current RFCOMM operation")
@@ -188,25 +245,33 @@ class AirohaRaceClient(
 
     @SuppressLint("MissingPermission")
     private fun socketCandidates(device: BluetoothDevice): List<SocketCandidate> = listOf(
+        SocketCandidate("Airoha RACE SDP UUID " + AIROHA_SDP_RACE_UUID + " · secure") { device.createRfcommSocketToServiceRecord(AIROHA_SDP_RACE_UUID) },
+        SocketCandidate("Airoha RACE SDP UUID " + AIROHA_SDP_RACE_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(AIROHA_SDP_RACE_UUID) },
         SocketCandidate("RFCOMM channel 21 · insecure") { createChannelSocket(device, true) },
         SocketCandidate("RFCOMM channel 21 · secure") { createChannelSocket(device, false) },
-        SocketCandidate("RACE UUID " + RACE_UUID + " · secure") { device.createRfcommSocketToServiceRecord(RACE_UUID) },
-        SocketCandidate("RACE UUID " + RACE_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(RACE_UUID) },
+        SocketCandidate("RACE RFCOMM UUID " + RACE_UUID + " · secure") { device.createRfcommSocketToServiceRecord(RACE_UUID) },
+        SocketCandidate("RACE RFCOMM UUID " + RACE_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(RACE_UUID) },
         SocketCandidate("JBL Vendor SPP " + JBL_VENDOR_UUID + " · secure") { device.createRfcommSocketToServiceRecord(JBL_VENDOR_UUID) },
-        SocketCandidate("JBL Vendor SPP " + JBL_VENDOR_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(JBL_VENDOR_UUID) }
+        SocketCandidate("JBL Vendor SPP " + JBL_VENDOR_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(JBL_VENDOR_UUID) },
+        SocketCandidate("Harman Classic SPP " + HARMAN_CLASSIC_SPP_UUID + " · secure") { device.createRfcommSocketToServiceRecord(HARMAN_CLASSIC_SPP_UUID) },
+        SocketCandidate("Harman Classic SPP " + HARMAN_CLASSIC_SPP_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(HARMAN_CLASSIC_SPP_UUID) }
     )
 
     @SuppressLint("MissingPermission")
-    private suspend fun connectWithTimeout(socket: BluetoothSocket, label: String) {
+    private suspend fun connectWithTimeout(
+        socket: BluetoothSocket,
+        label: String,
+        timeoutMs: Long = CONNECT_TIMEOUT_MS
+    ) {
         runCatching { bluetoothAdapter?.cancelDiscovery() }
         val connectJob = CoroutineScope(Dispatchers.IO).async { socket.connect() }
         var connected = false
         try {
-            connected = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+            connected = withTimeoutOrNull(timeoutMs) {
                 connectJob.await()
                 true
             } ?: false
-            if (!connected) throw IOException("RFCOMM connect timeout after " + CONNECT_TIMEOUT_MS + "ms · " + label)
+            if (!connected) throw IOException("RFCOMM connect timeout after " + timeoutMs + "ms · " + label)
         } finally {
             if (!connected) {
                 runCatching { socket.close() }
@@ -341,12 +406,23 @@ class AirohaRaceClient(
         private const val MAX_PENDING_BYTES = 4096
         private const val RFCOMM_CHANNEL = 21
         private const val CONNECT_TIMEOUT_MS = 4_000L
+        private const val RFCOMM_PROBE_TIMEOUT_MS = 2_500L
         private const val RESPONSE_TIMEOUT_MS = 3_000L
         private const val GET_NOISE_OPCODE = 0x0901
         private const val SET_NOISE_OPCODE = 0x0E06
         private const val POWER_OFF_OPCODE = 0x1101
+        val AIROHA_SDP_RACE_UUID: UUID = UUID.fromString("5052494d-2dab-0341-6972-6f6861424c45")
         private val RACE_UUID = UUID.fromString("00000000-0000-0000-0099-aabbccddeeff")
-        private val JBL_VENDOR_UUID = UUID.fromString("0000ff01-0000-1000-8000-00805f9b34ff")
+        val JBL_VENDOR_UUID = UUID.fromString("0000ff01-0000-1000-8000-00805f9b34ff")
+        val HARMAN_CLASSIC_SPP_UUID = UUID.fromString("f8d1fbe4-7966-4334-8024-ff96c9330e15")
+        val HARMAN_VOICE_SPP_UUID = UUID.fromString("81c2e72a-0591-443e-a1ff-05f988593351")
+        private val RFCOMM_PROBE_UUIDS = listOf(
+            AIROHA_SDP_RACE_UUID,
+            RACE_UUID,
+            JBL_VENDOR_UUID,
+            HARMAN_CLASSIC_SPP_UUID,
+            HARMAN_VOICE_SPP_UUID
+        )
         private val modeCommands = mapOf(
             "ANC" to ModeCommand(byteArrayOf(0x00, 0x0A, 0x01), 0x01),
             "Ambient Aware" to ModeCommand(byteArrayOf(0x00, 0x0A, 0x0A), 0x0A),

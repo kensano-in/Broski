@@ -100,6 +100,8 @@ data class VerlynProUiState(
     val assistantSelected: Boolean = false,
     val quickSetupDismissed: Boolean = false,
     val nativeBandCentersHz: List<Int> = emptyList(),
+    val globalMixFallbackEnabled: Boolean = false,
+    val rfcommProbeStatus: String = "Not probed",
     val audioBypassed: Boolean = false,
     val bassPunch: Float = 0f,
     val vocalPresence: Float = 0f,
@@ -124,6 +126,8 @@ data class VerlynProUiActions(
     val onAirohaListener: () -> Unit,
     val onCopyDump: () -> Unit,
     val onGainChange: (Int, Float) -> Unit,
+    val onGlobalMixFallbackChange: (Boolean) -> Unit = {},
+    val onProbeAllRfcommUuids: () -> Unit = {},
     val onEqEnabledChange: (Boolean) -> Unit,
     val onPreset: (String) -> Unit,
     val onPreampChange: (Float) -> Unit,
@@ -506,8 +510,11 @@ private fun ProInspectorPage(state: VerlynProUiState, actions: VerlynProUiAction
     var selectedEndpoint by remember { mutableStateOf(ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID.toString()) }
     val endpoints = listOf(
         ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID.toString() to "Google Fast Pair Message Stream",
-        ClassicRfcommEngine.JBL_VENDOR_UUID.toString() to "JBL vendor UUID · unverified",
-        ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID.toString() to "Custom / Airoha candidate · unverified"
+        ClassicRfcommEngine.AIROHA_SDP_RACE_UUID.toString() to "Airoha RACE SDP SPP",
+        ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID.toString() to "Airoha RACE RFCOMM UUID",
+        ClassicRfcommEngine.JBL_VENDOR_UUID.toString() to "JBL vendor SPP",
+        ClassicRfcommEngine.HARMAN_CLASSIC_SPP_UUID.toString() to "Harman Classic SPP",
+        ClassicRfcommEngine.HARMAN_VOICE_SPP_UUID.toString() to "Harman voice SPP"
     )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ProCard {

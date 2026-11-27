@@ -79,6 +79,7 @@ class VerlynConnectionService : Service() {
     private val raceLog = ArrayList<String>()
     private var lastJblRouteState: Boolean? = null
     @Volatile private var activeCodecStatus: String = "Unavailable"
+    @Volatile private var rfcommProbeStatus: String = "Not probed"
 
     private val routePoll = object : Runnable {
         override fun run() {
@@ -273,7 +274,7 @@ class VerlynConnectionService : Service() {
             ACTION_COMPANION_APPEARED, ACTION_COMMAND_ASSIST, ACTION_COMMAND_BRIEFING,
             ACTION_COMMAND_NEXT_EQ, ACTION_AUTO_EQ_RULES_CHANGED, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
             ACTION_POWER_OFF_HEADSET, ACTION_MANUAL_RFCOMM_CONNECT,
-            ACTION_MANUAL_RFCOMM_SEND, ACTION_AUDIO_SESSION_EVENT
+            ACTION_MANUAL_RFCOMM_SEND, ACTION_AUDIO_SESSION_EVENT, ACTION_PROBE_RFCOMM_UUIDS
         )
         if (!isJblA2dpRouteActive() && !isOperationalAction) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -292,6 +293,23 @@ class VerlynConnectionService : Service() {
             }
             ACTION_MANUAL_RFCOMM_CONNECT -> {
                 connectManualRfcomm(data?.getStringExtra(EXTRA_MANUAL_RFCOMM_UUID).orEmpty())
+            }
+            ACTION_PROBE_RFCOMM_UUIDS -> {
+                val device = ensureTarget()
+                if (device == null) {
+                    rfcommProbeStatus = "Probe unavailable · Pair JBL Tune 770NC first"
+                    publishState()
+                } else {
+                    rfcommProbeStatus = "Probing five Classic SDP UUIDs · 2.5s each"
+                    publishState()
+                    race.probeAllRfcommUuids(device) { result ->
+                        main.post {
+                            rfcommProbeStatus = result
+                            appendRaceLog(result)
+                            publishState()
+                        }
+                    }
+                }
             }
             ACTION_MANUAL_RFCOMM_SEND -> {
                 val bytes = data?.getByteArrayExtra(EXTRA_MANUAL_RFCOMM_BYTES) ?: ByteArray(0)
@@ -439,7 +457,10 @@ class VerlynConnectionService : Service() {
         }
         val label = when (uuid) {
             ClassicRfcommEngine.JBL_VENDOR_UUID -> "JBL Vendor SPP"
-            ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID -> "Airoha RACE UUID"
+            ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID -> "Airoha RACE RFCOMM UUID"
+            ClassicRfcommEngine.AIROHA_SDP_RACE_UUID -> "Airoha RACE SDP SPP"
+            ClassicRfcommEngine.HARMAN_CLASSIC_SPP_UUID -> "Harman Classic SPP"
+            ClassicRfcommEngine.HARMAN_VOICE_SPP_UUID -> "Harman Voice SPP"
             ClassicRfcommEngine.FAST_PAIR_MESSAGE_STREAM_UUID -> "Fast Pair Message Stream"
             else -> "Manual RFCOMM endpoint"
         }
@@ -565,7 +586,8 @@ class VerlynConnectionService : Service() {
 
         val requestedBluetoothOperation = action in setOf(
             ACTION_FORCE_CONNECT, ACTION_MANUAL_RFCOMM_CONNECT, ACTION_MANUAL_RFCOMM_SEND,
-            ACTION_SET_NOISE_MODE, ACTION_POWER_OFF_HEADSET, ACTION_COMPANION_APPEARED
+            ACTION_SET_NOISE_MODE, ACTION_POWER_OFF_HEADSET, ACTION_COMPANION_APPEARED,
+            ACTION_PROBE_RFCOMM_UUIDS
         )
         var typeMask = 0
         if (hasBluetoothConnectPermission() && (isJblA2dpRouteActive() || requestedBluetoothOperation)) {
@@ -609,6 +631,7 @@ class VerlynConnectionService : Service() {
             .putExtra(EXTRA_FIRMWARE, firmwareVersion ?: "")
             .putExtra(EXTRA_MODEL_ID, modelId ?: "")
             .putExtra(EXTRA_CODEC_STATUS, activeCodecStatus)
+            .putExtra(EXTRA_RFCOMM_PROBE_STATUS, rfcommProbeStatus)
             .putStringArrayListExtra(EXTRA_NOISE_MODES, ArrayList(noiseModes))
             .putStringArrayListExtra(EXTRA_AUDIO_SESSIONS, sessions))
         if (Build.VERSION.SDK_INT >= 26) {
@@ -1311,6 +1334,7 @@ class VerlynConnectionService : Service() {
         const val ACTION_MANUAL_RFCOMM_CONNECT = "com.verlyn.audio.MANUAL_RFCOMM_CONNECT"
         const val ACTION_MANUAL_RFCOMM_SEND = "com.verlyn.audio.MANUAL_RFCOMM_SEND"
         const val ACTION_MANUAL_RFCOMM_DISCONNECT = "com.verlyn.audio.MANUAL_RFCOMM_DISCONNECT"
+        const val ACTION_PROBE_RFCOMM_UUIDS = "com.verlyn.audio.PROBE_RFCOMM_UUIDS"
         const val EXTRA_MANUAL_RFCOMM_UUID = "manual_rfcomm_uuid"
         const val EXTRA_MANUAL_RFCOMM_BYTES = "manual_rfcomm_bytes"
         const val EXTRA_BATTERY = "battery"
@@ -1324,6 +1348,7 @@ class VerlynConnectionService : Service() {
         const val EXTRA_MODEL_ID = "model_id"
         const val EXTRA_CODEC_STATUS = "codec_status"
         const val EXTRA_AUDIO_SESSIONS = "audio_sessions"
+        const val EXTRA_RFCOMM_PROBE_STATUS = "rfcomm_probe_status"
         const val EXTRA_PACKET_UUID = "packet_uuid"
         const val EXTRA_PACKET_LENGTH = "packet_length"
         const val EXTRA_PACKET_HEX = "packet_hex"

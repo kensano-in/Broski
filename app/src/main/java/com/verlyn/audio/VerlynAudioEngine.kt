@@ -34,6 +34,7 @@ class VerlynAudioEngine(
     @Volatile private var routeActive = false
     @Volatile private var lastConfig = EffectConfig()
     @Volatile private var preferredEngine = "native"
+    @Volatile private var globalMixFallbackEnabled = false
 
     private data class EffectConfig(
         val gains: FloatArray = FloatArray(10),
@@ -61,7 +62,7 @@ class VerlynAudioEngine(
         val ids = (sessionPackages.keys + dynamics.keys + equalizers.keys + nativeLimiters.keys).distinct()
         ids.forEach { sessionId ->
             val packageName = sessionPackages[sessionId] ?: if (sessionId == 0) "Global Mix" else "Unknown app"
-            attach(sessionId, packageName, lastConfig)
+            attach(sessionId, packageName, lastConfig, allowGlobalSession = sessionId == 0 && globalMixFallbackEnabled)
         }
         onStatus(statusForEffects())
     }
@@ -70,7 +71,7 @@ class VerlynAudioEngine(
 
     @Synchronized
     fun nativeBandCenterFrequenciesHz(): List<Int> = runCatching {
-        val equalizer = equalizers.entries.firstOrNull { it.key > 0 }?.value ?: return emptyList()
+        val equalizer = equalizers.entries.firstOrNull { it.key > 0 }?.value ?: equalizers[0] ?: return emptyList()
         val count = equalizer.numberOfBands.toInt().coerceIn(0, 32)
         (0 until count).mapNotNull { band ->
             runCatching { (equalizer.getCenterFreq(band.toShort()).toInt() / 1000).coerceAtLeast(1) }.getOrNull()
@@ -94,8 +95,13 @@ class VerlynAudioEngine(
     }
 
     @Synchronized
-    private fun attach(sessionId: Int, packageName: String, config: EffectConfig) {
-        if (sessionId <= 0) {
+    private fun attach(
+        sessionId: Int,
+        packageName: String,
+        config: EffectConfig,
+        allowGlobalSession: Boolean = false
+    ) {
+        if (sessionId < 0 || (sessionId == 0 && !allowGlobalSession)) {
             onStatus("Standby (Waiting for Media Session)")
             return
         }
@@ -299,6 +305,26 @@ class VerlynAudioEngine(
     }
 
     @Synchronized
+    fun setGlobalMixFallback(
+        enabled: Boolean,
+        gains: FloatArray,
+        preamp: Float,
+        eqEnabled: Boolean,
+        limiterEnabled: Boolean,
+        balance: Float = 0f
+    ) {
+        val config = EffectConfig(gains.copyOf(), preamp, eqEnabled, limiterEnabled, balance)
+        lastConfig = config
+        globalMixFallbackEnabled = enabled
+        if (enabled) {
+            attach(0, "Global Mix (manual fallback)", config, allowGlobalSession = true)
+        } else {
+            releaseSessionEffects(0)
+            onStatus(statusForEffects())
+        }
+    }
+
+    @Synchronized
     fun setBypassed(value: Boolean) {
         if (bypassed == value) return
         bypassed = value
@@ -359,7 +385,7 @@ class VerlynAudioEngine(
 
     private fun activeEffectSessionIds(): List<Int> =
         (sessionPackages.keys + dynamics.keys + equalizers.keys + bassEffects.keys + virtualizers.keys)
-            .filter { it > 0 }.distinct()
+            .filter { it > 0 || (it == 0 && globalMixFallbackEnabled) }.distinct()
 
     @Synchronized
     fun setSpatial(enabled: Boolean) {
@@ -369,7 +395,7 @@ class VerlynAudioEngine(
     }
 
     private fun applyAuxEffects(sessionId: Int) {
-        if (sessionId <= 0) {
+        if (sessionId < 0 || (sessionId == 0 && !globalMixFallbackEnabled)) {
             onStatus("Standby (Waiting for Media Session)")
             return
         }
@@ -406,7 +432,7 @@ class VerlynAudioEngine(
     }
 
     private fun applyNativeLimiter(sessionId: Int, enabled: Boolean) {
-        if (sessionId <= 0) return
+        if (sessionId < 0 || (sessionId == 0 && !globalMixFallbackEnabled)) return
         if (!enabled) {
             nativeLimiters.remove(sessionId)?.let { runCatching { it.release() } }
             return
@@ -439,7 +465,14 @@ class VerlynAudioEngine(
 
     @Synchronized
     fun detachSession(sessionId: Int) {
-        if (sessionId == 0) return
+        if (sessionId == 0) {
+            if (globalMixFallbackEnabled) {
+                globalMixFallbackEnabled = false
+                releaseSessionEffects(0)
+                onStatus(statusForEffects())
+            }
+            return
+        }
         releaseSessionEffects(sessionId)
         sessionPackages.remove(sessionId)
         engineNames.remove(sessionId)
