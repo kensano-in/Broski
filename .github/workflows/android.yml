@@ -45,11 +45,11 @@ jobs:
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -F "versionName='0.4.1'"
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -F "versionCode='13'"
-      - name: Upload VERLYN 0.4.1 APK
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -F "versionName='0.4.2'"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -F "versionCode='14'"
+      - name: Upload VERLYN 0.4.2 APK
         uses: actions/upload-artifact@v7
         with:
-          name: verlyn-0.4.1-debug-apk
+          name: verlyn-0.4.2-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
