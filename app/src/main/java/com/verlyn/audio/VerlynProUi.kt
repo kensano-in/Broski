@@ -255,7 +255,7 @@ private fun ControlDashboard(
                 }
                 TextButton(onClick = { actions.onTabChange(1) }) { Text("EDIT EQ", color = VBlue) }
             }
-            SplineEqualizer(state.gains, {}, false, Modifier.fillMaxWidth().height(112.dp))
+            SplineEqualizer(state.gains, { _, _ -> }, false, Modifier.fillMaxWidth().height(112.dp))
             Text("10-band DynamicsProcessing · " + state.effectStatus, color = VMuted, fontSize = 9.sp)
         }
 
