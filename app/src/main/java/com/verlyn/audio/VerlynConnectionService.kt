@@ -1065,6 +1065,11 @@ class VerlynConnectionService : Service() {
     private fun reapplyAudioSettings() {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         VerlynAudioRuntime.get(this).setEngineMode(prefs.getString("audio_engine_mode", "native") ?: "native")
+        VerlynAudioRuntime.get(this).setMbcTuning(
+            prefs.getFloat("mbc_bass_punch", 0f),
+            prefs.getFloat("mbc_vocal_presence", 0f),
+            prefs.getFloat("mbc_treble_air", 0f)
+        )
         val gains = prefs.getString("eq_gains", null)?.split(",")?.mapNotNull { it.toFloatOrNull() }
             ?.takeIf { it.size == 10 }?.toFloatArray() ?: FloatArray(10)
         val balance = if (prefs.getBoolean("balance_enabled", false)) prefs.getFloat("balance", 0f) else 0f

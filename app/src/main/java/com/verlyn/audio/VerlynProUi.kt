@@ -97,7 +97,11 @@ data class VerlynProUiState(
     val manualRfcommHex: String = "",
     val companionConfigured: Boolean = false,
     val batteryUnrestricted: Boolean = false,
-    val assistantSelected: Boolean = false
+    val assistantSelected: Boolean = false,
+    val audioBypassed: Boolean = false,
+    val bassPunch: Float = 0f,
+    val vocalPresence: Float = 0f,
+    val trebleAir: Float = 0f
 )
 
 data class VerlynProUiActions(
@@ -140,7 +144,9 @@ data class VerlynProUiActions(
     val onHeadsetTriggerActionChange: (String, String) -> Unit = { _, _ -> },
     val onAssociateHeadset: () -> Unit = {},
     val onRequestBatteryUnrestricted: () -> Unit = {},
-    val onOpenVoiceInputSettings: () -> Unit = {}
+    val onOpenVoiceInputSettings: () -> Unit = {},
+    val onEqBypassChange: (Boolean) -> Unit = {},
+    val onMbcTuningChange: (String, Float) -> Unit = { _, _ -> }
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)

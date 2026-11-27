@@ -25,6 +25,10 @@ class VerlynAudioEngine(
     private val engineNames = linkedMapOf<Int, String>()
     @Volatile private var bassBoostEnabled = false
     @Volatile private var spatialEnabled = false
+    @Volatile private var bypassed = false
+    @Volatile private var bassPunch = 0f
+    @Volatile private var vocalPresence = 0f
+    @Volatile private var trebleAir = 0f
     @Volatile private var routeActive = false
     @Volatile private var lastConfig = EffectConfig()
     @Volatile private var preferredEngine = "native"
@@ -83,6 +87,7 @@ class VerlynAudioEngine(
         if (preferredEngine == "dynamics" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {
                 val preEqInUse = true
+                val mbcInUse = true
                 val limiterInUse = true
                 val preEq = buildEq(config.gains, config.eqEnabled)
                 preEq.setEnabled(true)
@@ -97,23 +102,24 @@ class VerlynAudioEngine(
                     DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
                     2,
                     preEqInUse, BAND_FREQUENCIES.size,
+                    mbcInUse, 3,
                     true, BAND_FREQUENCIES.size,
-                    false, 0,
                     limiterInUse
                 )
-                    .setInputGainAllChannelsTo(config.preamp.coerceIn(-12f, 12f))
+                    .setInputGainAllChannelsTo(effectiveInputPreamp(config))
                     .setPreEqAllChannelsTo(preEq)
+                    .setMbcAllChannelsTo(buildMbc())
                     .setPostEqAllChannelsTo(postEq)
                     .setLimiterAllChannelsTo(limiter)
 
                 val effect = DynamicsProcessing(0, sessionId, builder.build())
-                applyBalance(effect, config.preamp, config.balance)
+                applyBalance(effect, effectiveInputPreamp(config), config.balance)
                 if (!effect.hasControl()) {
                     effect.release()
                     throw IllegalStateException("DynamicsProcessing hasControl=false")
                 }
-                effect.enabled = true
-                if (!effect.enabled || !effect.hasControl()) {
+                effect.enabled = !bypassed
+                if (effect.enabled != !bypassed || !effect.hasControl()) {
                     effect.release()
                     throw IllegalStateException("DynamicsProcessing failed its enabled/control check")
                 }
@@ -146,8 +152,21 @@ class VerlynAudioEngine(
         }
     }
 
+    private fun effectiveInputPreamp(config: EffectConfig): Float {
+        val maxPositiveBandGain = if (config.eqEnabled) (config.gains.maxOrNull() ?: 0f).coerceAtLeast(0f) else 0f
+        return (config.preamp - maxPositiveBandGain).coerceIn(-24f, 12f)
+    }
+
+    private fun buildMbc(): DynamicsProcessing.Mbc {
+        return DynamicsProcessing.Mbc(true, true, 3).also { mbc ->
+            mbc.setBand(0, DynamicsProcessing.MbcBand(true, 250f, 10f, 100f, 2.0f, -24f, 6f, -70f, 1f, bassPunch.coerceIn(-6f, 6f), 0f))
+            mbc.setBand(1, DynamicsProcessing.MbcBand(true, 2_500f, 10f, 120f, 1.6f, -24f, 6f, -70f, 1f, vocalPresence.coerceIn(-6f, 6f), 0f))
+            mbc.setBand(2, DynamicsProcessing.MbcBand(true, 20_000f, 5f, 80f, 1.4f, -26f, 6f, -72f, 1f, trebleAir.coerceIn(-6f, 6f), 0f))
+        }
+    }
+
     private fun applyBalance(effect: DynamicsProcessing, preamp: Float, balance: Float) {
-        val base = preamp.coerceIn(-12f, 12f)
+        val base = preamp.coerceIn(-24f, 12f)
         val attenuation = kotlin.math.abs(balance.coerceIn(-1f, 1f)) * 24f
         val left = (base - if (balance > 0f) attenuation else 0f).coerceIn(-24f, 12f)
         val right = (base - if (balance < 0f) attenuation else 0f).coerceIn(-24f, 12f)
@@ -162,9 +181,9 @@ class VerlynAudioEngine(
                 eq.release()
                 throw IllegalStateException("Equalizer hasControl=false")
             }
-            applyLegacyEq(eq, config.gains, config.eqEnabled)
-            eq.enabled = config.eqEnabled
-            if (eq.enabled != config.eqEnabled || !eq.hasControl()) {
+            applyLegacyEq(eq, config.gains, config.eqEnabled && !bypassed)
+            eq.enabled = config.eqEnabled && !bypassed
+            if (eq.enabled != (config.eqEnabled && !bypassed) || !eq.hasControl()) {
                 eq.release()
                 throw IllegalStateException("Equalizer failed enabled/control check")
             }
@@ -213,15 +232,16 @@ class VerlynAudioEngine(
             if (dp != null) {
                 val updated = runCatching {
                     if (!dp.hasControl()) throw IllegalStateException("hasControl=false before update")
-                    dp.setInputGainAllChannelsTo(config.preamp.coerceIn(-12f, 12f))
-                    applyBalance(dp, config.preamp, config.balance)
+                    dp.setInputGainAllChannelsTo(effectiveInputPreamp(config))
+                    applyBalance(dp, effectiveInputPreamp(config), config.balance)
                     dp.setPreEqAllChannelsTo(buildEq(config.gains, config.eqEnabled))
+                    dp.setMbcAllChannelsTo(buildMbc())
                     dp.setPostEqAllChannelsTo(buildEq(FloatArray(BAND_FREQUENCIES.size), true))
                     dp.setLimiterAllChannelsTo(
                         DynamicsProcessing.Limiter(true, config.limiterEnabled, 0, 10f, 100f, 20f, -1f, 0f)
                     )
-                    dp.enabled = true
-                    if (!dp.enabled || !dp.hasControl()) throw IllegalStateException("enabled/control check failed after update")
+                    dp.enabled = !bypassed
+                    if (dp.enabled != !bypassed || !dp.hasControl()) throw IllegalStateException("enabled/control check failed after update")
                     true
                 }.getOrDefault(false)
                 if (!updated) {
@@ -238,8 +258,8 @@ class VerlynAudioEngine(
                 if (legacy != null) {
                     val updated = runCatching {
                         if (!legacy.hasControl()) throw IllegalStateException("Equalizer hasControl=false")
-                        applyLegacyEq(legacy, config.gains, config.eqEnabled)
-                        if (!legacy.hasControl() || legacy.enabled != config.eqEnabled) {
+                        applyLegacyEq(legacy, config.gains, config.eqEnabled && !bypassed)
+                        if (!legacy.hasControl() || legacy.enabled != (config.eqEnabled && !bypassed)) {
                             throw IllegalStateException("Equalizer did not confirm update")
                         }
                         true
@@ -252,6 +272,32 @@ class VerlynAudioEngine(
                 }
             }
             applyAuxEffects(sessionId)
+        }
+        onStatus(statusForEffects())
+    }
+
+    @Synchronized
+    fun setBypassed(value: Boolean) {
+        if (bypassed == value) return
+        bypassed = value
+        dynamics.values.forEach { effect -> runCatching { effect.enabled = !value } }
+        equalizers.values.forEach { effect -> runCatching { effect.enabled = lastConfig.eqEnabled && !value } }
+        bassEffects.values.forEach { effect -> runCatching { effect.enabled = bassBoostEnabled && !value } }
+        virtualizers.values.forEach { effect -> runCatching { effect.enabled = spatialEnabled && !value } }
+        nativeLimiters.values.forEach { effect -> runCatching { effect.enabled = lastConfig.limiterEnabled && !value } }
+        onStatus(statusForEffects())
+    }
+
+    @Synchronized
+    fun setMbcTuning(bass: Float, vocal: Float, air: Float) {
+        bassPunch = bass.coerceIn(-6f, 6f)
+        vocalPresence = vocal.coerceIn(-6f, 6f)
+        trebleAir = air.coerceIn(-6f, 6f)
+        dynamics.values.forEach { effect ->
+            runCatching {
+                if (!effect.hasControl()) throw IllegalStateException("DynamicsProcessing hasControl=false")
+                effect.setMbcAllChannelsTo(buildMbc())
+            }.onFailure { onStatus("MBC update unavailable: " + (it.message ?: it.javaClass.simpleName)) }
         }
         onStatus(statusForEffects())
     }
@@ -287,8 +333,9 @@ class VerlynAudioEngine(
             val bass = bassEffects[sessionId] ?: BassBoost(0, sessionId).also { bassEffects[sessionId] = it }
             if (!bass.hasControl()) throw IllegalStateException("BassBoost hasControl=false")
             if (bassBoostEnabled) bass.setStrength(650.toShort())
-            bass.enabled = bassBoostEnabled
-            if (bass.enabled != bassBoostEnabled || !bass.hasControl()) throw IllegalStateException("BassBoost failed enabled/control check")
+            val shouldEnableBass = bassBoostEnabled && !bypassed
+            bass.enabled = shouldEnableBass
+            if (bass.enabled != shouldEnableBass || !bass.hasControl()) throw IllegalStateException("BassBoost failed enabled/control check")
         }.onFailure {
             bassEffects.remove(sessionId)?.let { effect -> runCatching { effect.release() } }
             onStatus("Session $sessionId · BassBoost unavailable: " + (it.message ?: "no control"))
@@ -297,10 +344,10 @@ class VerlynAudioEngine(
         if (dynamics.containsKey(sessionId)) {
             nativeLimiters.remove(sessionId)?.let { runCatching { it.release() } }
         } else {
-            applyNativeLimiter(sessionId, lastConfig.limiterEnabled)
+            applyNativeLimiter(sessionId, lastConfig.limiterEnabled && !bypassed)
         }
 
-        if (spatialEnabled) {
+        if (spatialEnabled && !bypassed) {
             runCatching {
                 val virtualizer = virtualizers[sessionId] ?: Virtualizer(0, sessionId).also { virtualizers[sessionId] = it }
                 if (!virtualizer.hasControl()) throw IllegalStateException("Virtualizer hasControl=false")
@@ -334,7 +381,7 @@ class VerlynAudioEngine(
                 DynamicsProcessing(0, sessionId, config).also { nativeLimiters[sessionId] = it }
             }
             if (!limiter.hasControl()) throw IllegalStateException("native limiter hasControl=false")
-            limiter.enabled = true
+            limiter.enabled = enabled && !bypassed
             if (!limiter.enabled || !limiter.hasControl()) {
                 throw IllegalStateException("native limiter enabled/control check failed")
             }

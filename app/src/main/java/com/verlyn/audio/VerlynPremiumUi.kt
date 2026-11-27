@@ -6,6 +6,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -223,6 +224,27 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
                 color = if (s.audioSessionBindings.isNotEmpty()) VGreen else VMuted,
                 fontSize = 9.sp
             )
+            Surface(
+                modifier = Modifier.fillMaxWidth().pointerInput(Unit) {
+                    detectTapGestures(onPress = {
+                        a.onEqBypassChange(true)
+                        tryAwaitRelease()
+                        a.onEqBypassChange(false)
+                    })
+                },
+                color = if (s.audioBypassed) VBlue.copy(alpha = .24f) else Color(0xFF171B23),
+                shape = RoundedCornerShape(11.dp),
+                border = BorderStroke(1.dp, if (s.audioBypassed) VBlueLight else VBorder)
+            ) {
+                Text(
+                    if (s.audioBypassed) "ORIGINAL SOUND · RELEASE TO RESTORE" else "HOLD FOR ORIGINAL SOUND · A/B",
+                    modifier = Modifier.padding(vertical = 12.dp),
+                    color = if (s.audioBypassed) VBlueLight else VMuted,
+                    textAlign = TextAlign.Center,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("10-BAND EQUALIZER", fontWeight = FontWeight.Bold)
@@ -234,6 +256,12 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 FilterChip(selected = s.engineMode == "dynamics", onClick = { a.onEngineModeChange("dynamics") }, label = { Text("DynamicsProcessing (10-band)", fontSize = 10.sp) })
                 FilterChip(selected = s.engineMode == "native", onClick = { a.onEngineModeChange("native") }, label = { Text("Compatibility Equalizer (5-band Native)", fontSize = 10.sp) })
+            }
+            if (s.engineMode == "dynamics") {
+                Text("3-BAND DYNAMIC PUNCH", color = VBlueLight, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                Value("Bass Punch", s.bassPunch, -6f..6f, " dB") { a.onMbcTuningChange("bass", it) }
+                Value("Vocal Presence", s.vocalPresence, -6f..6f, " dB") { a.onMbcTuningChange("vocal", it) }
+                Value("Treble Air", s.trebleAir, -6f..6f, " dB") { a.onMbcTuningChange("air", it) }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("−12 dB", color = VMuted, fontSize = 9.sp)

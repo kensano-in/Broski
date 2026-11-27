@@ -160,6 +160,10 @@ class MainActivity : ComponentActivity() {
     private var companionConfigured by mutableStateOf(false)
     private var batteryUnrestricted by mutableStateOf(false)
     private var assistantSelected by mutableStateOf(false)
+    private var audioBypassed by mutableStateOf(false)
+    private var bassPunch by mutableFloatStateOf(0f)
+    private var vocalPresence by mutableFloatStateOf(0f)
+    private var trebleAir by mutableFloatStateOf(0f)
 
     private val companionAssociationLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
@@ -300,6 +304,7 @@ class MainActivity : ComponentActivity() {
         val enabled = eqEnabled
         val limited = limiterEnabled
         val channelBalance = if (balanceEnabled) balance else 0f
+        audioEngine.setMbcTuning(bassPunch, vocalPresence, trebleAir)
         lifecycleScope.launch(Dispatchers.Default) {
             if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(gains, currentPreamp, enabled, limited, channelBalance)
             else audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
@@ -625,6 +630,8 @@ class MainActivity : ComponentActivity() {
         refreshQuickSetupStatus()
         audioEngine = VerlynAudioRuntime.get(this)
         audioEngine.setEngineMode(engineMode)
+        audioEngine.setMbcTuning(bassPunch, vocalPresence, trebleAir)
+        audioEngine.setBypassed(false)
         audioEngine.setBassBoost(bassBoostEnabled)
         audioEngine.setSpatial(spatialEnabled)
         voiceAnnouncer = VoiceAnnouncer(this) { status ->
@@ -712,7 +719,11 @@ class MainActivity : ComponentActivity() {
                     manualRfcommHex = manualRfcommHex,
                     companionConfigured = companionConfigured,
                     batteryUnrestricted = batteryUnrestricted,
-                    assistantSelected = assistantSelected
+                    assistantSelected = assistantSelected,
+                    audioBypassed = audioBypassed,
+                    bassPunch = bassPunch,
+                    vocalPresence = vocalPresence,
+                    trebleAir = trebleAir
                 ),
                 actions = VerlynProUiActions(
                     onTabChange = { selectedTab = it },
@@ -803,6 +814,24 @@ class MainActivity : ComponentActivity() {
                     onAssociateHeadset = { associateJblCompanion() },
                     onRequestBatteryUnrestricted = { requestBatteryUnrestricted() },
                     onOpenVoiceInputSettings = { openVoiceInputSettings() },
+                    onEqBypassChange = { enabled ->
+                        audioBypassed = enabled
+                        audioEngine.setBypassed(enabled)
+                    },
+                    onMbcTuningChange = { band, value ->
+                        val next = value.coerceIn(-6f, 6f)
+                        when (band) {
+                            "bass" -> bassPunch = next
+                            "vocal" -> vocalPresence = next
+                            "air" -> trebleAir = next
+                        }
+                        preferences.edit()
+                            .putFloat("mbc_bass_punch", bassPunch)
+                            .putFloat("mbc_vocal_presence", vocalPresence)
+                            .putFloat("mbc_treble_air", trebleAir)
+                            .apply()
+                        audioEngine.setMbcTuning(bassPunch, vocalPresence, trebleAir)
+                    },
                     onEngineModeChange = { mode ->
                         engineMode = if (mode == "native") "native" else "dynamics"
                         preferences.edit().putString("audio_engine_mode", engineMode).apply()
@@ -1747,6 +1776,9 @@ class MainActivity : ComponentActivity() {
         spatialEnabled = preferences.getBoolean("spatial_enabled", false)
         balanceEnabled = preferences.getBoolean("balance_enabled", false)
         balance = preferences.getFloat("balance", 0f).coerceIn(-1f, 1f)
+        bassPunch = preferences.getFloat("mbc_bass_punch", 0f).coerceIn(-6f, 6f)
+        vocalPresence = preferences.getFloat("mbc_vocal_presence", 0f).coerceIn(-6f, 6f)
+        trebleAir = preferences.getFloat("mbc_treble_air", 0f).coerceIn(-6f, 6f)
     }
 
     private fun saveAudioPreferences() {
@@ -1761,6 +1793,9 @@ class MainActivity : ComponentActivity() {
             .putFloat("clarity", clarityValue)
             .putBoolean("bass_boost_enabled", bassBoostEnabled)
             .putBoolean("spatial_enabled", spatialEnabled)
+            .putFloat("mbc_bass_punch", bassPunch)
+            .putFloat("mbc_vocal_presence", vocalPresence)
+            .putFloat("mbc_treble_air", trebleAir)
             .putString("audio_engine_mode", engineMode)
             .apply()
         if (lastAppliedJblRoute == true) {
