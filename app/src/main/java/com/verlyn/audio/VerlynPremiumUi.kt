@@ -1,5 +1,6 @@
 package com.verlyn.audio
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -21,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -106,17 +108,34 @@ fun VerlynPremiumApp(state: VerlynProUiState, actions: VerlynProUiActions) {
 
 @Composable
 private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
+    val batterySweep by animateFloatAsState(
+        targetValue = (s.batteryPercent ?: 0).coerceIn(0, 100).toFloat() * 3.6f,
+        label = "headset-battery-ring"
+    )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PremiumCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(64.dp).background(Brush.radialGradient(listOf(VBlue.copy(alpha = .32f), VBlue.copy(alpha = .03f), Color.Transparent)), CircleShape), Alignment.Center) {
-                    Icon(Icons.Filled.Headphones, null, tint = VBlueLight, modifier = Modifier.size(34.dp))
+                Box(Modifier.size(68.dp), Alignment.Center) {
+                    Canvas(Modifier.fillMaxSize()) {
+                        val inset = 3.dp.toPx()
+                        val arcSize = Size(size.width - inset * 2f, size.height - inset * 2f)
+                        val stroke = androidx.compose.ui.graphics.drawscope.Stroke(3.dp.toPx(), cap = StrokeCap.Round)
+                        drawArc(VBorder, -90f, 360f, false, topLeft = Offset(inset, inset), size = arcSize, style = stroke)
+                        if (s.batteryPercent != null) {
+                            drawArc(VBlueLight, -90f, batterySweep, false, topLeft = Offset(inset, inset), size = arcSize, style = stroke)
+                        }
+                    }
+                    Box(Modifier.size(54.dp).background(Brush.radialGradient(listOf(VBlue.copy(alpha = .32f), VBlue.copy(alpha = .03f), Color.Transparent)), CircleShape), Alignment.Center) {
+                        Icon(Icons.Filled.Headphones, null, tint = VBlueLight, modifier = Modifier.size(32.dp))
+                    }
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("JBL TUNE 770NC", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                     Text(if (s.audioConnected) "Connected" else "Not connected", color = if (s.audioConnected) VGreen else VMuted, fontSize = 11.sp)
-                    Text(routeText(s.route), color = VMuted, fontSize = 9.sp, maxLines = 2)
+                    Surface(color = VBlue.copy(alpha = .12f), shape = RoundedCornerShape(7.dp)) {
+                        Text(if (s.audioConnected) "A2DP · CONNECTED" else routeText(s.route).uppercase(), color = VBlueLight, fontSize = 8.sp, modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp), maxLines = 1)
+                    }
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(s.batteryPercent?.let { "$it%" } ?: "—", fontSize = 21.sp, fontWeight = FontWeight.Bold)
@@ -164,7 +183,7 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
         PremiumCard {
             Text("QUICK AUDIO", fontWeight = FontWeight.Bold)
             Setting("Bass boost", "Low-frequency enhancement") { Switch(s.bassBoostEnabled, a.onBassBoostChange) }
-            Setting("Spatial audio", "Android virtualizer effect") { Switch(s.spatialEnabled, a.onSpatialChange) }
+            Setting("Spatial audio", "Native spatializer · virtualizer fallback") { Switch(s.spatialEnabled, a.onSpatialChange) }
             Setting("Peak limiter", "Output headroom control") { Switch(s.limiterEnabled, a.onLimiterChange) }
         }
     }

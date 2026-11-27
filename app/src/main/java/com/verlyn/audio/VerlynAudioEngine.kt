@@ -1,6 +1,7 @@
 package com.verlyn.audio
 
 import android.content.Context
+import android.media.AudioManager
 import android.media.audiofx.DynamicsProcessing
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Virtualizer
@@ -12,6 +13,7 @@ class VerlynAudioEngine(
     context: Context,
     private val onStatus: (String) -> Unit
 ) {
+    private val audioManager = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val effects = linkedMapOf<Int, DynamicsProcessing>()
     private val bassEffects = linkedMapOf<Int, BassBoost>()
     private val virtualizers = linkedMapOf<Int, Virtualizer>()
@@ -19,6 +21,7 @@ class VerlynAudioEngine(
     @Volatile private var bassBoostEnabled = false
     @Volatile private var spatialEnabled = false
     @Volatile private var routeActive = false
+    @Volatile private var eqEnabledState = true
 
     companion object {
         val BAND_FREQUENCIES = floatArrayOf(
@@ -37,6 +40,7 @@ class VerlynAudioEngine(
     }
 
     @Synchronized private fun attach(sessionId: Int, gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float) {
+        eqEnabledState = eqEnabled
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             if (!attachLegacy(sessionId, gains, eqEnabled)) onStatus("Bypassed — Android Equalizer unavailable")
             return
@@ -115,6 +119,7 @@ class VerlynAudioEngine(
     }
 
     @Synchronized fun apply(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
+        eqEnabledState = eqEnabled
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             applyLegacyEffects(gains, eqEnabled)
             onStatus(statusForEffects())
@@ -152,7 +157,7 @@ class VerlynAudioEngine(
     @Synchronized fun setRouteActive(active: Boolean) {
         routeActive = active
         effects.values.forEach { runCatching { it.enabled = active } }
-        legacyEqualizers.values.forEach { runCatching { it.enabled = active } }
+        legacyEqualizers.values.forEach { runCatching { it.enabled = active && eqEnabledState } }
         bassEffects.values.forEach { runCatching { it.enabled = active && bassBoostEnabled } }
         virtualizers.values.forEach { runCatching { it.enabled = active && spatialEnabled } }
         onStatus(statusForEffects())
@@ -177,9 +182,13 @@ class VerlynAudioEngine(
             bass.enabled = bassBoostEnabled && routeActive
         } catch (_: Throwable) { }
         try {
+            val platformSpatializerActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                runCatching { audioManager.spatializer.isAvailable && audioManager.spatializer.isEnabled }.getOrDefault(false)
             val virtualizer = virtualizers.getOrPut(sessionId) { Virtualizer(0, sessionId) }
             virtualizer.setStrength(500.toShort())
-            virtualizer.enabled = spatialEnabled && routeActive
+            // Prefer Android's native spatializer when active; only enable the app-controlled
+            // Virtualizer fallback when platform spatialization is unavailable or disabled.
+            virtualizer.enabled = spatialEnabled && !platformSpatializerActive && routeActive
         } catch (_: Throwable) { }
     }
 
