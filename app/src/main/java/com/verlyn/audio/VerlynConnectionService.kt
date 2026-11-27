@@ -118,8 +118,8 @@ class VerlynConnectionService : Service() {
                     VerlynAudioRuntime.get(this@VerlynConnectionService).setRouteActive(false)
                 }
                 CODEC_CONFIG_CHANGED_ACTION -> {
-                    val deviceMatches = device == null || target?.address == device.address ||
-                        (device != null && isJbl(safeName(device)))
+                    val deviceMatches = device == null ||
+                        target?.address == device.address || isJbl(safeName(device))
                     if (deviceMatches) updateCodecStatus(data)
                 }
                 BATTERY_ACTION -> {
