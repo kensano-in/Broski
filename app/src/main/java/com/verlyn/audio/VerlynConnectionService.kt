@@ -792,7 +792,10 @@ class VerlynConnectionService : Service() {
             .putFloat("preamp", selected.second).apply()
         reapplyAudioSettings()
         commandEqPreviewPending = true
-        speakCommand(next)
+        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
+        main.postDelayed({
+            if (commandMode == CommandMode.EQ_SCROLL_MODE) speakCommand(next)
+        }, 250L)
         appendRaceLog("EQ SCROLL · $current → $next · live preview requested")
     }
 
@@ -1070,6 +1073,8 @@ class VerlynConnectionService : Service() {
             prefs.getFloat("mbc_vocal_presence", 0f),
             prefs.getFloat("mbc_treble_air", 0f)
         )
+        VerlynAudioRuntime.get(this).setBassBoostStrength(prefs.getInt("bass_boost_strength", 65))
+        VerlynAudioRuntime.get(this).setSpatialStrength(prefs.getInt("spatial_strength", 65))
         val gains = prefs.getString("eq_gains", null)?.split(",")?.mapNotNull { it.toFloatOrNull() }
             ?.takeIf { it.size == 10 }?.toFloatArray() ?: FloatArray(10)
         val balance = if (prefs.getBoolean("balance_enabled", false)) prefs.getFloat("balance", 0f) else 0f

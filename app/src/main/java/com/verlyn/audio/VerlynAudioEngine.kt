@@ -25,6 +25,8 @@ class VerlynAudioEngine(
     private val engineNames = linkedMapOf<Int, String>()
     @Volatile private var bassBoostEnabled = false
     @Volatile private var spatialEnabled = false
+    @Volatile private var bassStrengthPercent = 65
+    @Volatile private var spatialStrengthPercent = 65
     @Volatile private var bypassed = false
     @Volatile private var bassPunch = 0f
     @Volatile private var vocalPresence = 0f
@@ -328,6 +330,23 @@ class VerlynAudioEngine(
     }
 
     @Synchronized
+    fun setBassBoostStrength(percent: Int) {
+        bassStrengthPercent = percent.coerceIn(0, 100)
+        activeEffectSessionIds().forEach(::applyAuxEffects)
+        onStatus(statusForEffects())
+    }
+
+    @Synchronized
+    fun setSpatialStrength(percent: Int) {
+        spatialStrengthPercent = percent.coerceIn(0, 100)
+        activeEffectSessionIds().forEach(::applyAuxEffects)
+        onStatus(statusForEffects())
+    }
+
+    private fun activeEffectSessionIds(): List<Int> =
+        (sessionPackages.keys + dynamics.keys + equalizers.keys + bassEffects.keys + virtualizers.keys).distinct().ifEmpty { listOf(0) }
+
+    @Synchronized
     fun setSpatial(enabled: Boolean) {
         spatialEnabled = enabled
         (sessionPackages.keys + dynamics.keys + equalizers.keys + virtualizers.keys).distinct().ifEmpty { listOf(0) }.forEach {
@@ -340,7 +359,7 @@ class VerlynAudioEngine(
         runCatching {
             val bass = bassEffects[sessionId] ?: BassBoost(0, sessionId).also { bassEffects[sessionId] = it }
             if (!bass.hasControl()) throw IllegalStateException("BassBoost hasControl=false")
-            if (bassBoostEnabled) bass.setStrength(650.toShort())
+            if (bassBoostEnabled) bass.setStrength((bassStrengthPercent * 10).toShort())
             val shouldEnableBass = bassBoostEnabled && !bypassed
             bass.enabled = shouldEnableBass
             if (bass.enabled != shouldEnableBass || !bass.hasControl()) throw IllegalStateException("BassBoost failed enabled/control check")
@@ -359,7 +378,7 @@ class VerlynAudioEngine(
             runCatching {
                 val virtualizer = virtualizers[sessionId] ?: Virtualizer(0, sessionId).also { virtualizers[sessionId] = it }
                 if (!virtualizer.hasControl()) throw IllegalStateException("Virtualizer hasControl=false")
-                virtualizer.setStrength(650.toShort())
+                virtualizer.setStrength((spatialStrengthPercent * 10).toShort())
                 virtualizer.enabled = true
                 if (!virtualizer.enabled || !virtualizer.hasControl()) throw IllegalStateException("Virtualizer failed enabled/control check")
             }.onFailure {

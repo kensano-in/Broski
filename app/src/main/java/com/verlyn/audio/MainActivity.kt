@@ -164,6 +164,8 @@ class MainActivity : ComponentActivity() {
     private var bassPunch by mutableFloatStateOf(0f)
     private var vocalPresence by mutableFloatStateOf(0f)
     private var trebleAir by mutableFloatStateOf(0f)
+    private var bassBoostStrength by mutableFloatStateOf(65f)
+    private var spatialStrength by mutableFloatStateOf(65f)
 
     private val companionAssociationLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
@@ -631,6 +633,8 @@ class MainActivity : ComponentActivity() {
         audioEngine = VerlynAudioRuntime.get(this)
         audioEngine.setEngineMode(engineMode)
         audioEngine.setMbcTuning(bassPunch, vocalPresence, trebleAir)
+        audioEngine.setBassBoostStrength(bassBoostStrength.toInt())
+        audioEngine.setSpatialStrength(spatialStrength.toInt())
         audioEngine.setBypassed(false)
         audioEngine.setBassBoost(bassBoostEnabled)
         audioEngine.setSpatial(spatialEnabled)
@@ -724,7 +728,9 @@ class MainActivity : ComponentActivity() {
                     audioBypassed = audioBypassed,
                     bassPunch = bassPunch,
                     vocalPresence = vocalPresence,
-                    trebleAir = trebleAir
+                    trebleAir = trebleAir,
+                    bassBoostStrength = bassBoostStrength,
+                    spatialStrength = spatialStrength
                 ),
                 actions = VerlynProUiActions(
                     onTabChange = { selectedTab = it },
@@ -819,6 +825,16 @@ class MainActivity : ComponentActivity() {
                         audioBypassed = enabled
                         audioEngine.setBypassed(enabled)
                     },
+                    onBassStrengthChange = { value ->
+                        bassBoostStrength = value.coerceIn(0f, 100f)
+                        preferences.edit().putInt("bass_boost_strength", bassBoostStrength.toInt()).apply()
+                        audioEngine.setBassBoostStrength(bassBoostStrength.toInt())
+                    },
+                    onSpatialStrengthChange = { value ->
+                        spatialStrength = value.coerceIn(0f, 100f)
+                        preferences.edit().putInt("spatial_strength", spatialStrength.toInt()).apply()
+                        audioEngine.setSpatialStrength(spatialStrength.toInt())
+                    },
                     onMbcTuningChange = { band, value ->
                         val next = value.coerceIn(-6f, 6f)
                         when (band) {
@@ -830,6 +846,8 @@ class MainActivity : ComponentActivity() {
                             .putFloat("mbc_bass_punch", bassPunch)
                             .putFloat("mbc_vocal_presence", vocalPresence)
                             .putFloat("mbc_treble_air", trebleAir)
+            .putInt("bass_boost_strength", bassBoostStrength.toInt())
+            .putInt("spatial_strength", spatialStrength.toInt())
                             .apply()
                         audioEngine.setMbcTuning(bassPunch, vocalPresence, trebleAir)
                     },
@@ -1780,6 +1798,8 @@ class MainActivity : ComponentActivity() {
         bassPunch = preferences.getFloat("mbc_bass_punch", 0f).coerceIn(-6f, 6f)
         vocalPresence = preferences.getFloat("mbc_vocal_presence", 0f).coerceIn(-6f, 6f)
         trebleAir = preferences.getFloat("mbc_treble_air", 0f).coerceIn(-6f, 6f)
+        bassBoostStrength = preferences.getInt("bass_boost_strength", 65).coerceIn(0, 100).toFloat()
+        spatialStrength = preferences.getInt("spatial_strength", 65).coerceIn(0, 100).toFloat()
     }
 
     private fun saveAudioPreferences() {

@@ -102,7 +102,9 @@ data class VerlynProUiState(
     val audioBypassed: Boolean = false,
     val bassPunch: Float = 0f,
     val vocalPresence: Float = 0f,
-    val trebleAir: Float = 0f
+    val trebleAir: Float = 0f,
+    val bassBoostStrength: Float = 65f,
+    val spatialStrength: Float = 65f
 )
 
 data class VerlynProUiActions(
@@ -147,7 +149,9 @@ data class VerlynProUiActions(
     val onRequestBatteryUnrestricted: () -> Unit = {},
     val onOpenVoiceInputSettings: () -> Unit = {},
     val onEqBypassChange: (Boolean) -> Unit = {},
-    val onMbcTuningChange: (String, Float) -> Unit = { _, _ -> }
+    val onMbcTuningChange: (String, Float) -> Unit = { _, _ -> },
+    val onBassStrengthChange: (Float) -> Unit = {},
+    val onSpatialStrengthChange: (Float) -> Unit = {}
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)
