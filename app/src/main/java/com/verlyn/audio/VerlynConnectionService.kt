@@ -190,7 +190,8 @@ class VerlynConnectionService : Service() {
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
         val bluetoothAdapter = bluetoothManager.adapter
-        VerlynAudioRuntime.get(this)
+        runCatching { VerlynAudioRuntime.get(this) }
+            .onFailure { android.util.Log.e("Verlyn", "Audio engine initialization failed", it) }
         race = AirohaRaceClient(bluetoothAdapter) { line -> main.post {
             noiseDetail = line
             appendRaceLog(line)
@@ -229,9 +230,12 @@ class VerlynConnectionService : Service() {
             } },
             bluetoothAdapter = bluetoothAdapter
         )
-        registerBluetoothReceiver()
-        registerAudioReceivers()
-        registerPlaybackCallback()
+        runCatching { registerBluetoothReceiver() }
+            .onFailure { appendRaceLog("Bluetooth receiver startup failed · " + (it.message ?: "unknown")) }
+        runCatching { registerAudioReceivers() }
+            .onFailure { appendRaceLog("Audio receiver startup failed · " + (it.message ?: "unknown")) }
+        runCatching { registerPlaybackCallback() }
+            .onFailure { appendRaceLog("Playback callback startup failed · " + (it.message ?: "unknown")) }
         main.post(routePoll)
 
         bluetoothAdapter?.let { adapter ->
