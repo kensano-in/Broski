@@ -295,6 +295,10 @@ class VerlynAudioEngine(
         bassEffects.values.forEach { effect -> runCatching { effect.enabled = bassBoostEnabled && !value } }
         virtualizers.values.forEach { effect -> runCatching { effect.enabled = spatialEnabled && !value } }
         nativeLimiters.values.forEach { effect -> runCatching { effect.enabled = lastConfig.limiterEnabled && !value } }
+        if (!value) {
+            (sessionPackages.keys + dynamics.keys + equalizers.keys + bassEffects.keys +
+                virtualizers.keys + nativeLimiters.keys).distinct().forEach(::applyAuxEffects)
+        }
         onStatus(statusForEffects())
     }
 

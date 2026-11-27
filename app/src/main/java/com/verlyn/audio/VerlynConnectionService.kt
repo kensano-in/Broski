@@ -259,7 +259,7 @@ class VerlynConnectionService : Service() {
         }
         val isOperationalAction = data?.action in setOf(
             ACTION_COMPANION_APPEARED, ACTION_COMMAND_ASSIST, ACTION_COMMAND_BRIEFING,
-            ACTION_COMMAND_NEXT_EQ, ACTION_FIND_HEADSET_PING, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
+            ACTION_COMMAND_NEXT_EQ, ACTION_FORCE_CONNECT, ACTION_SET_NOISE_MODE,
             ACTION_POWER_OFF_HEADSET, ACTION_MANUAL_RFCOMM_CONNECT,
             ACTION_MANUAL_RFCOMM_SEND
         )
@@ -971,8 +971,6 @@ class VerlynConnectionService : Service() {
             val pulseTime = time % cycleDuration
             var sample = 0.toShort()
             if (pulseTime < pulseDuration) {
-                val progress = (pulseTime / pulseDuration).coerceIn(0.0, 1.0)
-                val frequency = 620.0 + 980.0 * progress
                 val phase = 2.0 * Math.PI * (620.0 * pulseTime +
                     (980.0 * pulseTime * pulseTime) / (2.0 * pulseDuration))
                 val attack = (pulseTime / 0.018).coerceIn(0.0, 1.0)
