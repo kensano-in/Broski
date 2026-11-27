@@ -1,54 +1,56 @@
 package com.verlyn.audio
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
+import androidx.core.content.ContextCompat
 
-/** Transparent entry point used when Android forwards the headset assistant key. */
+/** Transparent ACTION_ASSIST / ACTION_VOICE_COMMAND fallback. */
 class VerlynAssistActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        triggerCommandMode()
+        CommandModeController.onAssistTriggered(this)
+        finish()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        triggerCommandMode()
-    }
-
-    private fun triggerCommandMode() {
-        runCatching {
-            androidx.core.content.ContextCompat.startForegroundService(
-                this,
-                Intent(this, VerlynConnectionService::class.java)
-                    .setAction(VerlynConnectionService.ACTION_COMMAND_ASSIST)
-            )
-        }
+        CommandModeController.onAssistTriggered(this)
         finish()
     }
 }
 
-class VerlynAssistantVoiceInteractionService : VoiceInteractionService()
+/** Android's selectable default digital-assistant service. */
+class VerlynVoiceInteractionService : VoiceInteractionService()
 
-class VerlynAssistantSessionService : VoiceInteractionSessionService() {
+class VerlynVoiceInteractionSessionService : VoiceInteractionSessionService() {
     override fun onNewSession(args: Bundle?): VoiceInteractionSession =
-        VerlynAssistantSession(this)
+        VerlynVoiceInteractionSession(this)
 }
 
-private class VerlynAssistantSession(private val appContext: android.content.Context) : VoiceInteractionSession(appContext) {
+private class VerlynVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
+        CommandModeController.onAssistTriggered(context)
+        // A voice interaction session is transient here; never leave a blank overlay on screen.
+        hide()
+    }
+}
+
+/** Single entry point shared by the assistant session and legacy activity fallback. */
+object CommandModeController {
+    fun onAssistTriggered(context: Context) {
         runCatching {
-            androidx.core.content.ContextCompat.startForegroundService(
-                appContext,
-                Intent(appContext, VerlynConnectionService::class.java)
+            ContextCompat.startForegroundService(
+                context.applicationContext,
+                Intent(context.applicationContext, VerlynConnectionService::class.java)
                     .setAction(VerlynConnectionService.ACTION_COMMAND_ASSIST)
             )
         }
-        finish()
     }
 }
