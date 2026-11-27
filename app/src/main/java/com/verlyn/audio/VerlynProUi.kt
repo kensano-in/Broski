@@ -94,7 +94,10 @@ data class VerlynProUiState(
     val headsetGesturesEnabled: Boolean = false,
     val headsetTriggerActions: Map<String, String> = emptyMap(),
     val manualRfcommTargetUuid: String = ClassicRfcommEngine.JBL_VENDOR_UUID.toString(),
-    val manualRfcommHex: String = ""
+    val manualRfcommHex: String = "",
+    val companionConfigured: Boolean = false,
+    val batteryUnrestricted: Boolean = false,
+    val assistantSelected: Boolean = false
 )
 
 data class VerlynProUiActions(
@@ -134,7 +137,10 @@ data class VerlynProUiActions(
     val onManualRfcommHexChange: (String) -> Unit = {},
     val onSendRfcommHex: () -> Unit = {},
     val onHeadsetGesturesEnabledChange: (Boolean) -> Unit = {},
-    val onHeadsetTriggerActionChange: (String, String) -> Unit = { _, _ -> }
+    val onHeadsetTriggerActionChange: (String, String) -> Unit = { _, _ -> },
+    val onAssociateHeadset: () -> Unit = {},
+    val onRequestBatteryUnrestricted: () -> Unit = {},
+    val onOpenVoiceInputSettings: () -> Unit = {}
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)

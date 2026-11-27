@@ -186,10 +186,14 @@ class VerlynConnectionService : Service() {
             appendRaceLog(line)
             publishState()
         } }
-        voiceAnnouncer = VoiceAnnouncer(this, { line -> main.post {
-            appendRaceLog("HEADSET TTS · " + line)
-            sendSmartLog(line)
-        } }, { main.post { onCommandSpeechFinished() } })
+        voiceAnnouncer = VoiceAnnouncer(
+            this,
+            onUtteranceFinished = { main.post { onCommandSpeechFinished() } },
+            onStatus = { line -> main.post {
+                appendRaceLog("HEADSET TTS · " + line)
+                sendSmartLog(line)
+            } }
+        )
         rfcomm = ClassicRfcommEngine(
             onStatus = { value -> main.post {
                 linkStatus = value
@@ -314,7 +318,11 @@ class VerlynConnectionService : Service() {
             ACTION_AUDIO_SETTINGS_CHANGED -> reapplyAudioSettings()
             ACTION_COMMAND_ASSIST -> handleAssistantCommand()
             ACTION_COMMAND_BRIEFING -> {
-                if (commandMode == CommandMode.IDLE) enterCommandWindow()
+                if (commandMode == CommandMode.IDLE) {
+                    savedCommandVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    commandMode = CommandMode.COMMAND_WINDOW
+                    syncHeadsetVolumeReceiver()
+                }
                 runConfiguredCommand("command_center_long_hold", "speak_full_briefing")
             }
             ACTION_COMMAND_NEXT_EQ -> cyclePresetFromNotification()
@@ -757,6 +765,10 @@ class VerlynConnectionService : Service() {
         savedCommandVolume = -1
         syncHeadsetVolumeReceiver()
         if (previous != CommandMode.IDLE) appendRaceLog("COMMAND MODE · $previous → IDLE · $reason")
+        if (!isJblA2dpRouteActive()) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     private fun lockEqScrollMode() {
@@ -954,13 +966,6 @@ class VerlynConnectionService : Service() {
         }
         val preamp = if (name == "Bass" || name == "Club" || name == "Extreme Bass") -2f else 0f
         return gains to preamp
-    }
-
-    private fun defaultHeadsetAction(key: String): String = when (key) {
-        HEADSET_DOWN_THREE -> "speak_time"
-        HEADSET_UP_THREE -> "speak_battery"
-        HEADSET_DOWN_UP -> "cycle_eq"
-        else -> "disabled"
     }
 
     private fun registerAudioReceivers() {

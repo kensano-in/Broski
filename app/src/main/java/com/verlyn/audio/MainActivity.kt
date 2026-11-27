@@ -22,6 +22,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.ComponentName
+import android.companion.AssociationRequest
+import android.companion.CompanionDeviceManager
+import android.bluetooth.le.BluetoothDeviceFilter
+import android.net.Uri
+import android.os.PowerManager
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
@@ -40,6 +45,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.IntentSenderRequest
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.RowScope
@@ -151,6 +157,30 @@ class MainActivity : ComponentActivity() {
     private var balanceEnabled by mutableStateOf(false)
     private var balance by mutableFloatStateOf(0f)
     private var accessibilityEnabled by mutableStateOf(false)
+    private var companionConfigured by mutableStateOf(false)
+    private var batteryUnrestricted by mutableStateOf(false)
+    private var assistantSelected by mutableStateOf(false)
+
+    private val companionAssociationLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            @Suppress("DEPRECATION")
+            val device = result.data?.getParcelableExtra<BluetoothDevice>(CompanionDeviceManager.EXTRA_DEVICE)
+            if (device != null) {
+                preferences.edit().putString("companion_mac", device.address)
+                    .putBoolean("companion_device_associated", true).apply()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    runCatching {
+                        (getSystemService(COMPANION_DEVICE_SERVICE) as CompanionDeviceManager)
+                            .startObservingDevicePresence(device.address)
+                    }.onFailure { appendLog("Companion presence observer failed · " + (it.message ?: "unsupported")) }
+                }
+                refreshQuickSetupStatus()
+                Toast.makeText(this, "JBL companion association saved", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     private val gattOperationQueue = ArrayDeque<GattOperation>()
     private var activeGattOperation: GattOperation? = null
     private var pendingGattDevice: BluetoothDevice? = null
@@ -592,6 +622,7 @@ class MainActivity : ComponentActivity() {
         scanner = adapter?.bluetoothLeScanner
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         loadAudioPreferences()
+        refreshQuickSetupStatus()
         audioEngine = VerlynAudioRuntime.get(this)
         audioEngine.setEngineMode(engineMode)
         audioEngine.setBassBoost(bassBoostEnabled)
@@ -678,7 +709,10 @@ class MainActivity : ComponentActivity() {
                     headsetGesturesEnabled = headsetGesturesEnabled,
                     headsetTriggerActions = headsetTriggerActions.toMap(),
                     manualRfcommTargetUuid = manualRfcommTargetUuid,
-                    manualRfcommHex = manualRfcommHex
+                    manualRfcommHex = manualRfcommHex,
+                    companionConfigured = companionConfigured,
+                    batteryUnrestricted = batteryUnrestricted,
+                    assistantSelected = assistantSelected
                 ),
                 actions = VerlynProUiActions(
                     onTabChange = { selectedTab = it },
@@ -723,7 +757,7 @@ class MainActivity : ComponentActivity() {
                         smartTriggerActions[slot] = action
                         preferences.edit().putString(slot, action).apply()
                     },
-                    onOpenAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                    onOpenAccessibilitySettings = { openVoiceInputSettings() },
                     onTestVoice = {
                         val time = SimpleDateFormat("h:mm a", Locale.US).format(Date())
                         speakNow("It is " + time)
@@ -758,15 +792,17 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onPowerOffHeadset = { VerlynConnectionService.requestPowerOff(this@MainActivity) },
-                    onHeadsetGesturesEnabledChange = { enabled ->
-                        headsetGesturesEnabled = enabled
-                        preferences.edit().putBoolean("headset_earcup_gestures_enabled", enabled).apply()
-                        sendBroadcast(Intent(VerlynConnectionService.ACTION_AUX_CHANGED).setPackage(packageName))
+                    onHeadsetGesturesEnabledChange = { _ ->
+                        headsetGesturesEnabled = false
+                        preferences.edit().putBoolean("headset_earcup_gestures_enabled", false).apply()
                     },
                     onHeadsetTriggerActionChange = { key, action ->
                         headsetTriggerActions[key] = action
                         preferences.edit().putString(key, action).apply()
                     },
+                    onAssociateHeadset = { associateJblCompanion() },
+                    onRequestBatteryUnrestricted = { requestBatteryUnrestricted() },
+                    onOpenVoiceInputSettings = { openVoiceInputSettings() },
                     onEngineModeChange = { mode ->
                         engineMode = if (mode == "native") "native" else "dynamics"
                         preferences.edit().putString("audio_engine_mode", engineMode).apply()
@@ -1397,24 +1433,69 @@ class MainActivity : ComponentActivity() {
             "trigger_volume_up_double" to "toggle_limiter"
         )
         slots.forEach { (key, defaultValue) -> smartTriggerActions[key] = preferences.getString(key, defaultValue) ?: defaultValue }
-        val headsetSlots = listOf(
-            VerlynConnectionService.HEADSET_DOWN_THREE to "speak_time",
-            VerlynConnectionService.HEADSET_UP_THREE to "speak_battery",
-            VerlynConnectionService.HEADSET_DOWN_UP to "cycle_eq"
+        val commandSlots = listOf(
+            "command_vol_up_single" to "speak_battery",
+            "command_vol_down_single" to "enter_eq_scroll",
+            "command_vol_up_double" to "toggle_bass_boost",
+            "command_vol_down_double" to "cycle_sleep_timer",
+            "command_center_long_hold" to "speak_full_briefing"
         )
-        headsetGesturesEnabled = preferences.getBoolean("headset_earcup_gestures_enabled", false)
-        headsetSlots.forEach { (key, defaultValue) ->
+        headsetGesturesEnabled = false
+        preferences.edit().putBoolean("headset_earcup_gestures_enabled", false).apply()
+        commandSlots.forEach { (key, defaultValue) ->
             headsetTriggerActions[key] = preferences.getString(key, defaultValue) ?: defaultValue
         }
-        accessibilityEnabled = isSmartAccessibilityEnabled()
+        refreshQuickSetupStatus()
     }
 
-    private fun isSmartAccessibilityEnabled(): Boolean {
-        return try {
-            val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
-            val expected = ComponentName(this, VerlynSmartButtonService::class.java).flattenToString()
-            enabled.split(':').any { it.equals(expected, ignoreCase = true) }
-        } catch (_: Throwable) { false }
+    private fun isSmartAccessibilityEnabled(): Boolean = runCatching {
+        val selected = Settings.Secure.getString(contentResolver, Settings.Secure.VOICE_INTERACTION_SERVICE).orEmpty()
+        selected.contains(packageName, ignoreCase = true) &&
+            selected.contains(VerlynAssistantVoiceInteractionService::class.java.simpleName, ignoreCase = true)
+    }.getOrDefault(false)
+
+    private fun refreshQuickSetupStatus() {
+        companionConfigured = preferences.getBoolean("companion_device_associated", false)
+        batteryUnrestricted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            runCatching { (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName) }.getOrDefault(false)
+        } else true
+        assistantSelected = isSmartAccessibilityEnabled()
+        accessibilityEnabled = assistantSelected
+    }
+
+    private fun openVoiceInputSettings() {
+        runCatching { startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)) }
+            .onFailure { Toast.makeText(this, "Voice input settings are unavailable", Toast.LENGTH_LONG).show() }
+    }
+
+    private fun requestBatteryUnrestricted() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            runCatching {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            }.onFailure { Toast.makeText(this, "Battery optimization settings could not be opened", Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    private fun associateJblCompanion() {
+        val request = AssociationRequest.Builder()
+            .addDeviceFilter(BluetoothDeviceFilter.Builder()
+                .setNamePattern(java.util.regex.Pattern.compile("(?i)JBL\\s*Tune\\s*770NC"))
+                .build())
+            .setSingleDevice(true)
+            .build()
+        val manager = getSystemService(COMPANION_DEVICE_SERVICE) as CompanionDeviceManager
+        runCatching {
+            manager.associate(request, object : CompanionDeviceManager.Callback() {
+                override fun onDeviceFound(chooserLauncher: android.content.IntentSender) {
+                    companionAssociationLauncher.launch(IntentSenderRequest.Builder(chooserLauncher).build())
+                }
+                override fun onFailure(error: CharSequence?) {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, error ?: "No JBL Tune 770NC found", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }, mainHandler)
+        }.onFailure { Toast.makeText(this, "Companion association failed · " + (it.message ?: "unsupported"), Toast.LENGTH_LONG).show() }
     }
 
     private fun observeCustomPresets() {
@@ -1569,7 +1650,7 @@ class MainActivity : ComponentActivity() {
             else -> "Unavailable"
         }
         val dump = buildString {
-            appendLine("VERLYN 0.3.3 — COMPLETE AUDIO / BLUETOOTH DUMP")
+            appendLine("VERLYN 0.4.0 — COMPLETE AUDIO / BLUETOOTH DUMP")
             appendLine("Device: " + (target?.let { safeDeviceName(it) } ?: "Not selected"))
             appendLine("Address: " + (target?.let { safeAddress(it) } ?: "Unavailable"))
             appendLine("BLE state: " + bleState)
@@ -1630,7 +1711,7 @@ class MainActivity : ComponentActivity() {
         }
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Verlyn diagnostic dump", dump))
-        Toast.makeText(this, "VERLYN 0.3.3 diagnostic dump copied", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "VERLYN 0.4.0 diagnostic dump copied", Toast.LENGTH_SHORT).show()
     }
 
     private fun updateSessionCompatibility(enabled: Boolean) {
@@ -1809,7 +1890,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (::audioEngine.isInitialized) applyAudioSettings()
         refreshVolume(); refreshClassicState(); refreshOutputRoute()
-        accessibilityEnabled = isSmartAccessibilityEnabled()
+        refreshQuickSetupStatus()
         if (adapter != null && hasBluetoothPermissions() && adapter?.isEnabled == true && !scanActive) {
             loadPairedDevices(); startScan(); startConnectionService()
         }

@@ -113,6 +113,21 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
         label = "headset-battery-ring"
     )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (!s.companionConfigured || !s.batteryUnrestricted || !s.assistantSelected) {
+            PremiumCard {
+                Text("QUICK SETUP", color = VBlueLight, fontWeight = FontWeight.Bold)
+                Text("This checklist disappears when all three setup steps are complete.", color = VMuted, fontSize = 10.sp)
+                Setting("Smart Auto-Connect", if (s.companionConfigured) "JBL association saved" else "Associate JBL Tune 770NC") {
+                    Button(onClick = a.onAssociateHeadset, enabled = !s.companionConfigured, colors = ButtonDefaults.buttonColors(containerColor = VBlue)) { Text(if (s.companionConfigured) "DONE" else "SET UP") }
+                }
+                Setting("Unrestricted Battery", if (s.batteryUnrestricted) "Optimization exemption granted" else "Allow the companion to survive screen-off") {
+                    Button(onClick = a.onRequestBatteryUnrestricted, enabled = !s.batteryUnrestricted, colors = ButtonDefaults.buttonColors(containerColor = VBlue)) { Text(if (s.batteryUnrestricted) "DONE" else "ALLOW") }
+                }
+                Setting("Headset Assistant Trigger", if (s.assistantSelected) "Verlyn is the selected assistant" else "Choose Verlyn in voice input settings") {
+                    Button(onClick = a.onOpenVoiceInputSettings, enabled = !s.assistantSelected, colors = ButtonDefaults.buttonColors(containerColor = VBlue)) { Text(if (s.assistantSelected) "DONE" else "OPEN") }
+                }
+            }
+        }
         PremiumCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(68.dp), Alignment.Center) {
@@ -343,64 +358,29 @@ private fun EqSpline(gains: List<Float>, onChange: (Int, Float) -> Unit) {
 private fun SmartTab(s: VerlynProUiState, a: VerlynProUiActions, pick: (String) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PremiumCard {
-            Text("SMART BUTTON ENGINE", color = VBlueLight, fontWeight = FontWeight.Bold)
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Column {
-                    Text(if (s.accessibilityEnabled) "Active" else "Tap to enable", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Text("Volume-key gestures", color = VMuted, fontSize = 10.sp)
+            Text("HEADSET COMMAND MODE", color = VBlueLight, fontWeight = FontWeight.Bold)
+            Text("Long-hold the JBL centre button for about two seconds. Normal volume and single-tap media controls remain native.", color = VMuted, fontSize = 11.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = a.onOpenVoiceInputSettings, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = VBlue)) {
+                    Text(if (s.assistantSelected) "ASSISTANT SETTINGS" else "SET DEFAULT ASSISTANT")
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = a.onOpenAccessibilitySettings, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = VBlue)) {
-                        Text(if (s.accessibilityEnabled) "SETTINGS" else "ENABLE")
-                    }
-                    OutlinedButton(onClick = a.onTestVoice, modifier = Modifier.weight(1f)) { Text("TEST VOICE") }
-                }
+                OutlinedButton(onClick = a.onTestVoice, modifier = Modifier.weight(1f)) { Text("TEST VOICE") }
             }
+            Text(if (s.assistantSelected) "Verlyn is the Android digital assistant." else "Select Verlyn in Android voice input settings to receive the headset assistant action.", color = if (s.assistantSelected) VGreen else VMuted, fontSize = 10.sp)
         }
         PremiumCard {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("HEADSET EARCUP GESTURES", fontWeight = FontWeight.Bold)
-                    Text("JBL absolute-volume events · active on JBL A2DP", color = VMuted, fontSize = 9.sp)
-                }
-                Switch(s.headsetGesturesEnabled, a.onHeadsetGesturesEnabledChange)
-            }
-            Text(
-                if (s.headsetGesturesEnabled) "Listening while JBL A2DP is connected" else "Disabled · enable to use headset volume buttons",
-                color = if (s.headsetGesturesEnabled) VBlueLight else VMuted,
-                fontSize = 9.sp
-            )
-            HeadsetGestureAssignment(
-                "3× quick Vol− · Speak exact time",
-                s.headsetTriggerActions["headset_volume_down_3"] ?: "speak_time",
-                { a.onHeadsetTriggerActionChange("headset_volume_down_3", it) }
-            )
-            HeadsetGestureAssignment(
-                "3× quick Vol+ · Speak phone & headset battery",
-                s.headsetTriggerActions["headset_volume_up_3"] ?: "speak_battery",
-                { a.onHeadsetTriggerActionChange("headset_volume_up_3", it) }
-            )
-            HeadsetGestureAssignment(
-                "Vol− → Vol+ · Cycle EQ preset",
-                s.headsetTriggerActions["headset_volume_down_up"] ?: "cycle_eq",
-                { a.onHeadsetTriggerActionChange("headset_volume_down_up", it) }
-            )
-            Text("The starting music volume is restored before a matched gesture runs.", color = VMuted, fontSize = 9.sp)
+            Text("COMMAND WINDOW · 5 SECONDS", fontWeight = FontWeight.Bold)
+            Text("The window opens after the centre-button long-hold. Volume is restored to its entry level after every command.", color = VMuted, fontSize = 10.sp)
+            HeadsetGestureAssignment("Vol + · single tap", s.headsetTriggerActions["command_vol_up_single"] ?: "speak_battery") { a.onHeadsetTriggerActionChange("command_vol_up_single", it) }
+            HeadsetGestureAssignment("Vol − · single tap", s.headsetTriggerActions["command_vol_down_single"] ?: "enter_eq_scroll") { a.onHeadsetTriggerActionChange("command_vol_down_single", it) }
+            HeadsetGestureAssignment("Vol + · double tap", s.headsetTriggerActions["command_vol_up_double"] ?: "toggle_bass_boost") { a.onHeadsetTriggerActionChange("command_vol_up_double", it) }
+            HeadsetGestureAssignment("Vol − · double tap", s.headsetTriggerActions["command_vol_down_double"] ?: "cycle_sleep_timer") { a.onHeadsetTriggerActionChange("command_vol_down_double", it) }
+            HeadsetGestureAssignment("Centre · long-hold again", s.headsetTriggerActions["command_center_long_hold"] ?: "speak_full_briefing") { a.onHeadsetTriggerActionChange("command_center_long_hold", it) }
         }
         PremiumCard {
-            Text("PHONE VOLUME-KEY GESTURES", fontWeight = FontWeight.Bold)
-            Text("Uses phone volume keys while screen is on or locked.", color = VMuted, fontSize = 9.sp)
-            Text(s.smartKeyStatus, color = VBlueLight, fontSize = 9.sp)
-            slots.forEach { slot ->
-                Row(Modifier.fillMaxWidth().clickable { pick(slot.first) }.padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(slot.second, fontSize = 12.sp)
-                        Text(actionName(s.triggerActions[slot.first] ?: slot.third), color = VMuted, fontSize = 10.sp)
-                    }
-                    Text("CHANGE  ›", color = VBlueLight, fontSize = 9.sp)
-                }
-                HorizontalDivider(color = VBorder)
-            }
+            Text("EQ SCROLL MODE", fontWeight = FontWeight.Bold)
+            Text("Vol + / Vol − selects the next or previous preset. Each change is previewed for four seconds; five seconds of inactivity locks the preset.", color = VMuted, fontSize = 10.sp)
+            Text("Sleep timer cycles 15 · 30 · 45 · 60 minutes · Off.", color = VMuted, fontSize = 10.sp)
         }
     }
 }
@@ -413,14 +393,13 @@ private fun HeadsetGestureAssignment(
 ) {
     var expanded by remember { mutableStateOf(false) }
     val options = listOf(
-        "speak_time" to "Speak exact current time",
-        "speak_battery" to "Speak phone & headset battery",
-        "cycle_eq" to "Cycle EQ preset",
-        "toggle_limiter" to "Toggle peak limiter",
+        "speak_battery" to "Speak Battery",
+        "enter_eq_scroll" to "Enter EQ Scroll Mode",
         "toggle_bass_boost" to "Toggle Bass Boost",
-        "media_next" to "Media · Next",
-        "media_previous" to "Media · Previous",
-        "media_play_pause" to "Media · Play / Pause",
+        "cycle_sleep_timer" to "Cycle Sleep Timer",
+        "toggle_spatial" to "Toggle Spatial Audio",
+        "toggle_volume_cap" to "Toggle Volume Cap",
+        "speak_full_briefing" to "Speak Full Briefing",
         "disabled" to "Disabled"
     )
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
