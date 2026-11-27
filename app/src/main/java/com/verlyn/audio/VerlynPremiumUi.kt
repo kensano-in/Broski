@@ -189,7 +189,8 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text("CLASSIC LINK", color = VMuted, fontSize = 9.sp)
-                    Text(if (s.rfcommState.contains("Connected", true)) "CONNECTED" else "AUTO MONITOR", color = VBlueLight, fontSize = 10.sp)
+                    val classicConnected = s.audioConnected && s.rfcommState.startsWith("Connected", true)
+            Text(if (classicConnected) "CONNECTED" else "DISCONNECTED", color = if (classicConnected) VBlueLight else VMuted, fontSize = 10.sp)
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -302,14 +303,16 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
             }
             EqSpline(graphValues) { nodeIndex, value ->
                 val frequency = graphCenters.getOrElse(nodeIndex) { 1000 }
-                val gainIndex = VerlynAudioEngine.BAND_FREQUENCIES.indices.minByOrNull { index ->
-                    kotlin.math.abs(kotlin.math.ln(VerlynAudioEngine.BAND_FREQUENCIES[index].toDouble()) - kotlin.math.ln(frequency.toDouble()))
-                } ?: nodeIndex.coerceIn(0, 9)
-                if (active != nodeIndex) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                active = nodeIndex
-                activeGain = value
-                draft = draft.toMutableList().also { it[gainIndex] = value }
-                a.onGainChange(gainIndex, value)
+                if (draft.isNotEmpty()) {
+                    val gainIndex = (VerlynAudioEngine.BAND_FREQUENCIES.indices.minByOrNull { index ->
+                        kotlin.math.abs(kotlin.math.ln(VerlynAudioEngine.BAND_FREQUENCIES[index].toDouble()) - kotlin.math.ln(frequency.toDouble()))
+                    } ?: nodeIndex).coerceIn(0, draft.lastIndex)
+                    if (active != nodeIndex) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    active = nodeIndex
+                    activeGain = value
+                    draft = draft.toMutableList().also { it[gainIndex] = value }
+                    a.onGainChange(gainIndex, value)
+                }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 graphCenters.forEach { frequency -> Text(formatEqFrequency(frequency), color = VMuted, fontSize = 7.sp, maxLines = 1) }
@@ -408,6 +411,7 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
 }
 
 private fun gainAtFrequency(frequencyHz: Float, gains: List<Float>): Float {
+    if (gains.isEmpty()) return 0f
     val anchors = VerlynAudioEngine.BAND_FREQUENCIES
     val frequency = frequencyHz.coerceAtLeast(1f)
     if (frequency <= anchors.first()) return gains.firstOrNull() ?: 0f
@@ -429,18 +433,22 @@ private fun formatEqFrequency(frequencyHz: Int): String =
 private fun EqSpline(gains: List<Float>, onChange: (Int, Float) -> Unit) {
     val current by rememberUpdatedState(gains)
     val callback by rememberUpdatedState(onChange)
-    Canvas(Modifier.fillMaxWidth().height(218.dp).padding(horizontal = 8.dp).pointerInput(Unit) {
+    Canvas(Modifier.fillMaxWidth().height(218.dp).padding(horizontal = 8.dp).pointerInput(current.size) {
         detectDragGestures(
             onDragStart = { p ->
-                val lastIndex = (current.size - 1).coerceAtLeast(1)
-                val i = ((p.x / size.width) * lastIndex).roundToInt().coerceIn(0, lastIndex)
-                callback(i, (12f - p.y / size.height * 24f).coerceIn(-12f, 12f))
+                if (current.isNotEmpty() && size.width > 0f && size.height > 0f) {
+                    val lastIndex = current.lastIndex.coerceAtLeast(0)
+                    val i = ((p.x / size.width) * lastIndex).roundToInt().coerceIn(0, lastIndex)
+                    callback(i, (12f - p.y / size.height * 24f).coerceIn(-12f, 12f))
+                }
             },
             onDrag = { change, _ ->
-                change.consume()
-                val lastIndex = (current.size - 1).coerceAtLeast(1)
-                val i = ((change.position.x / size.width) * lastIndex).roundToInt().coerceIn(0, lastIndex)
-                callback(i, (12f - change.position.y / size.height * 24f).coerceIn(-12f, 12f))
+                if (current.isNotEmpty() && size.width > 0f && size.height > 0f) {
+                    val lastIndex = current.lastIndex.coerceAtLeast(0)
+                    val i = ((change.position.x / size.width) * lastIndex).roundToInt().coerceIn(0, lastIndex)
+                    callback(i, (12f - change.position.y / size.height * 24f).coerceIn(-12f, 12f))
+                    change.consume()
+                }
             }
         )
     }) {
@@ -619,6 +627,23 @@ private fun HeadsetGestureAssignment(
 private fun InspectorTab(s: VerlynProUiState, a: VerlynProUiActions) {
     var confirmPowerOff by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (s.lastCrashReport.isNotBlank()) {
+            PremiumCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("LAST CRASH REPORT", modifier = Modifier.weight(1f), color = VBlueLight, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    TextButton(onClick = a.onDismissCrashReport) { Text("DISMISS", color = VMuted, fontSize = 9.sp) }
+                }
+                Text(
+                    s.lastCrashReport.lineSequence().take(3).joinToString("\n"),
+                    color = VMuted,
+                    fontSize = 9.sp,
+                    maxLines = 3
+                )
+                Button(onClick = a.onCopyCrashTrace, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = VBlue)) {
+                    Text("COPY CRASH TRACE")
+                }
+            }
+        }
         PremiumCard {
             Text("CONNECTION INSPECTOR", fontWeight = FontWeight.Bold)
             InspectorLine("Bluetooth audio", if (s.audioConnected) "Connected" else "Standby")
