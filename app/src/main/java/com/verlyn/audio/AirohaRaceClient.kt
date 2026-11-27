@@ -121,21 +121,39 @@ class AirohaRaceClient(
             val accepted = mutableListOf<UUID>()
             try {
                 for (uuid in RFCOMM_PROBE_UUIDS) {
-                    var socket: BluetoothSocket? = null
-                    try {
-                        onLog("RFCOMM UUID PROBE · " + uuid + " · timeout=" + RFCOMM_PROBE_TIMEOUT_MS + "ms")
-                        socket = device.createRfcommSocketToServiceRecord(uuid)
-                        activeSocket = socket
-                        connectWithTimeout(socket, "probe " + uuid, RFCOMM_PROBE_TIMEOUT_MS)
+                    val deadline = SystemClock.elapsedRealtime() + RFCOMM_PROBE_TIMEOUT_MS
+                    var acceptedSocket = false
+                    var lastError: Throwable? = null
+                    onLog("RFCOMM UUID PROBE · " + uuid + " · budget=" + RFCOMM_PROBE_TIMEOUT_MS + "ms")
+                    val factories = listOf(
+                        "secure" to { device.createRfcommSocketToServiceRecord(uuid) },
+                        "insecure" to { device.createInsecureRfcommSocketToServiceRecord(uuid) }
+                    )
+                    for ((transport, createSocket) in factories) {
+                        val remaining = deadline - SystemClock.elapsedRealtime()
+                        if (remaining <= 0L) break
+                        var socket: BluetoothSocket? = null
+                        try {
+                            socket = createSocket()
+                            activeSocket = socket
+                            connectWithTimeout(socket, "probe " + uuid + " " + transport, remaining)
+                            acceptedSocket = true
+                            break
+                        } catch (error: Throwable) {
+                            lastError = error
+                        } finally {
+                            if (!acceptedSocket) closeSocket(socket)
+                        }
+                    }
+                    if (acceptedSocket) {
                         accepted.add(uuid)
                         results.add(uuid.toString() + " · SOCKET ACCEPTED")
                         onLog("RFCOMM UUID PROBE ACCEPTED · " + uuid)
-                    } catch (error: Throwable) {
-                        val detail = error.message ?: error.javaClass.simpleName
+                        closeSocket(activeSocket)
+                    } else {
+                        val detail = lastError?.message ?: lastError?.javaClass?.simpleName ?: "timeout"
                         results.add(uuid.toString() + " · no socket (" + detail.take(90) + ")")
                         onLog("RFCOMM UUID PROBE failed · " + uuid + " · " + detail)
-                    } finally {
-                        closeSocket(socket)
                     }
                 }
             } finally {
@@ -227,10 +245,10 @@ class AirohaRaceClient(
 
     @SuppressLint("MissingPermission")
     private fun socketCandidates(device: BluetoothDevice): List<SocketCandidate> = listOf(
-        SocketCandidate("RFCOMM channel 21 · insecure") { createChannelSocket(device, true) },
-        SocketCandidate("RFCOMM channel 21 · secure") { createChannelSocket(device, false) },
         SocketCandidate("Airoha RACE SDP UUID " + AIROHA_SDP_RACE_UUID + " · secure") { device.createRfcommSocketToServiceRecord(AIROHA_SDP_RACE_UUID) },
         SocketCandidate("Airoha RACE SDP UUID " + AIROHA_SDP_RACE_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(AIROHA_SDP_RACE_UUID) },
+        SocketCandidate("RFCOMM channel 21 · insecure") { createChannelSocket(device, true) },
+        SocketCandidate("RFCOMM channel 21 · secure") { createChannelSocket(device, false) },
         SocketCandidate("RACE RFCOMM UUID " + RACE_UUID + " · secure") { device.createRfcommSocketToServiceRecord(RACE_UUID) },
         SocketCandidate("RACE RFCOMM UUID " + RACE_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(RACE_UUID) },
         SocketCandidate("JBL Vendor SPP " + JBL_VENDOR_UUID + " · secure") { device.createRfcommSocketToServiceRecord(JBL_VENDOR_UUID) },
