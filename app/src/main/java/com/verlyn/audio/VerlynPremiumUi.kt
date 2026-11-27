@@ -186,7 +186,7 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
         PremiumCard {
             Text("QUICK AUDIO", fontWeight = FontWeight.Bold)
             Setting("Bass boost", "Low-frequency enhancement") { Switch(s.bassBoostEnabled, a.onBassBoostChange) }
-            Setting("Spatial audio", "Native spatializer · virtualizer fallback") { Switch(s.spatialEnabled, a.onSpatialChange) }
+            Setting("Spatial audio", "Android Virtualizer effect") { Switch(s.spatialEnabled, a.onSpatialChange) }
             Setting("Peak limiter", "Output headroom control") { Switch(s.limiterEnabled, a.onLimiterChange) }
         }
     }
