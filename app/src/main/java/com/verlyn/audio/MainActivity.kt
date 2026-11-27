@@ -644,6 +644,7 @@ class MainActivity : ComponentActivity() {
         audioEngine.setBypassed(false)
         audioEngine.setBassBoost(bassBoostEnabled)
         audioEngine.setSpatial(spatialEnabled)
+        audioEffectStatus = audioEngine.statusForEffects()
         voiceAnnouncer = VoiceAnnouncer(this) { status ->
             runOnUiThread {
                 ttsStatus = status
