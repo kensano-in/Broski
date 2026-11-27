@@ -238,6 +238,7 @@ class MainActivity : ComponentActivity() {
     private var firmwareVersion by mutableStateOf("")
     private var modelId by mutableStateOf("")
     private var audioSessionBindings by mutableStateOf(emptyList<String>())
+    private var audioCodecStatus by mutableStateOf("Unavailable")
     private val raceCaptureLog = mutableStateListOf<String>()
     private var ttsStatus by mutableStateOf("TTS initializing")
     private var testAudioStatus by mutableStateOf("")
@@ -569,6 +570,7 @@ class MainActivity : ComponentActivity() {
                     firmwareVersion = intent.getStringExtra(VerlynConnectionService.EXTRA_FIRMWARE)?.takeIf { it.isNotBlank() } ?: firmwareVersion
                     modelId = intent.getStringExtra(VerlynConnectionService.EXTRA_MODEL_ID)?.takeIf { it.isNotBlank() } ?: modelId
                     audioSessionBindings = intent.getStringArrayListExtra(VerlynConnectionService.EXTRA_AUDIO_SESSIONS)?.toList() ?: audioSessionBindings
+                    audioCodecStatus = intent.getStringExtra(VerlynConnectionService.EXTRA_CODEC_STATUS) ?: audioCodecStatus
                     rfcommState = intent.getStringExtra(VerlynConnectionService.EXTRA_LINK) ?: rfcommState
                     serviceNoiseMode = intent.getStringExtra(VerlynConnectionService.EXTRA_NOISE_MODE) ?: serviceNoiseMode
                     serviceNoiseReady = intent.getBooleanExtra(VerlynConnectionService.EXTRA_NOISE_READY, serviceNoiseReady)
@@ -727,6 +729,7 @@ class MainActivity : ComponentActivity() {
                     batteryUnrestricted = batteryUnrestricted,
                     assistantSelected = assistantSelected,
                     autoEqRules = autoEqRules.toMap(),
+                    codecStatus = audioCodecStatus,
                     nativeBandCentersHz = audioEngine.nativeBandCenterFrequenciesHz(),
                     audioBypassed = audioBypassed,
                     bassPunch = bassPunch,

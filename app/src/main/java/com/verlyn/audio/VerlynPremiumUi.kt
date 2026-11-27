@@ -114,6 +114,22 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
         label = "headset-battery-ring"
     )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Surface(
+            color = VCard,
+            shape = RoundedCornerShape(11.dp),
+            border = BorderStroke(1.dp, VBorder)
+        ) {
+            val bound = s.audioSessionBindings.firstOrNull() ?: "No media session"
+            val auto = if (s.companionConfigured && s.audioConnected) "ON" else "STANDBY"
+            Text(
+                ("APP " + bound + "  ·  DSP " + s.engineMode.uppercase(Locale.US) +
+                    "  ·  CODEC " + s.codecStatus + "  ·  AUTO " + auto).take(160),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                color = VMuted,
+                fontSize = 8.sp,
+                maxLines = 1
+            )
+        }
         if (!s.companionConfigured || !s.batteryUnrestricted || !s.assistantSelected) {
             PremiumCard {
                 Text("QUICK SETUP", color = VBlueLight, fontWeight = FontWeight.Bold)
@@ -610,6 +626,7 @@ private fun InspectorTab(s: VerlynProUiState, a: VerlynProUiActions) {
             InspectorLine("Model ID", s.modelId.ifBlank { "Not received" })
             InspectorLine("Noise control", s.noiseStatus.ifBlank { s.noiseMode })
             InspectorLine("Audio effect", s.effectStatus)
+            InspectorLine("Bluetooth codec", s.codecStatus)
             InspectorLine("TTS engine", s.ttsStatus)
             s.audioSessionBindings.forEach { InspectorLine("Bound session", it) }
             InspectorLine("Smart keys", s.smartKeyStatus)

@@ -105,7 +105,8 @@ data class VerlynProUiState(
     val trebleAir: Float = 0f,
     val bassBoostStrength: Float = 65f,
     val spatialStrength: Float = 65f,
-    val autoEqRules: Map<String, String> = emptyMap()
+    val autoEqRules: Map<String, String> = emptyMap(),
+    val codecStatus: String = "Unavailable"
 )
 
 data class VerlynProUiActions(

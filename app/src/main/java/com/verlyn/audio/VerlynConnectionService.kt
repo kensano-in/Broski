@@ -76,6 +76,7 @@ class VerlynConnectionService : Service() {
     private val recentSessionEvents = LinkedHashMap<String, Long>()
     private val raceLog = ArrayList<String>()
     private var lastJblRouteState: Boolean? = null
+    @Volatile private var activeCodecStatus: String = "Unavailable"
 
     private val routePoll = object : Runnable {
         override fun run() {
@@ -115,6 +116,11 @@ class VerlynConnectionService : Service() {
                 AudioManager.ACTION_AUDIO_BECOMING_NOISY -> {
                     lastJblRouteState = false
                     VerlynAudioRuntime.get(this@VerlynConnectionService).setRouteActive(false)
+                }
+                CODEC_CONFIG_CHANGED_ACTION -> {
+                    val deviceMatches = device == null || target?.address == device.address ||
+                        (device != null && isJbl(safeName(device)))
+                    if (deviceMatches) updateCodecStatus(data)
                 }
                 BATTERY_ACTION -> {
                     val level = data.getIntExtra(BATTERY_EXTRA, -1)
@@ -546,11 +552,41 @@ class VerlynConnectionService : Service() {
             .putExtra(EXTRA_NOISE_READY, noiseReady)
             .putExtra(EXTRA_FIRMWARE, firmwareVersion ?: "")
             .putExtra(EXTRA_MODEL_ID, modelId ?: "")
+            .putExtra(EXTRA_CODEC_STATUS, activeCodecStatus)
             .putStringArrayListExtra(EXTRA_NOISE_MODES, ArrayList(noiseModes))
             .putStringArrayListExtra(EXTRA_AUDIO_SESSIONS, sessions))
         if (Build.VERSION.SDK_INT >= 26) {
             runCatching { (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION_ID, notification()) }
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun updateCodecStatus(intent: Intent) {
+        if (Build.VERSION.SDK_INT < 33) {
+            activeCodecStatus = "Unavailable · API 33+"
+            publishState()
+            return
+        }
+        val status = runCatching {
+            intent.getParcelableExtra(
+                android.bluetooth.BluetoothCodecStatus.EXTRA_CODEC_STATUS,
+                android.bluetooth.BluetoothCodecStatus::class.java
+            )
+        }.getOrNull()
+        val config = status?.codecConfig
+        activeCodecStatus = when (config?.codecType) {
+            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_SBC -> "SBC"
+            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_AAC -> "AAC"
+            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_APTX -> "aptX"
+            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_APTX_HD -> "aptX HD"
+            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_LDAC -> "LDAC"
+            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_LC3 -> "LC3"
+            android.bluetooth.BluetoothCodecConfig.SOURCE_CODEC_TYPE_OPUS -> "Opus"
+            null -> "Unavailable"
+            else -> "Other"
+        }
+        appendRaceLog("A2DP CODEC · " + activeCodecStatus)
+        publishState()
     }
 
     private fun registerBluetoothReceiver() {
@@ -561,6 +597,7 @@ class VerlynConnectionService : Service() {
             addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
             addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
             addAction(BATTERY_ACTION)
+            addAction(CODEC_CONFIG_CHANGED_ACTION)
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED)
         else registerReceiver(bluetoothReceiver, filter)
@@ -1247,6 +1284,7 @@ class VerlynConnectionService : Service() {
 
     companion object {
         const val ACTION_STATE = "com.verlyn.audio.CONNECTION_STATE"
+        const val CODEC_CONFIG_CHANGED_ACTION = "android.bluetooth.a2dp.profile.action.CODEC_CONFIG_CHANGED"
         const val ACTION_COMMAND_ASSIST = "com.verlyn.audio.COMMAND_ASSIST"
         const val ACTION_COMMAND_BRIEFING = "com.verlyn.audio.COMMAND_BRIEFING"
         const val ACTION_COMMAND_NEXT_EQ = "com.verlyn.audio.COMMAND_NEXT_EQ"
@@ -1277,6 +1315,7 @@ class VerlynConnectionService : Service() {
         const val EXTRA_NOISE_MODES = "noise_modes"
         const val EXTRA_FIRMWARE = "firmware"
         const val EXTRA_MODEL_ID = "model_id"
+        const val EXTRA_CODEC_STATUS = "codec_status"
         const val EXTRA_AUDIO_SESSIONS = "audio_sessions"
         const val EXTRA_PACKET_UUID = "packet_uuid"
         const val EXTRA_PACKET_LENGTH = "packet_length"
