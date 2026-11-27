@@ -19,12 +19,12 @@ class VerlynSmartButtonService : AccessibilityService() {
     private lateinit var audio: AudioManager
     private lateinit var voice: VoiceAnnouncer
     private val downAt = mutableMapOf<Int, Long>()
-    private val longFired = mutableSetOf<Int>()
+    private val longPressTriggered = mutableSetOf<Int>()
     private val pendingShort = mutableMapOf<Int, Runnable>()
     private val lastTap = mutableMapOf<Int, Long>()
     private val longTasks = mutableMapOf<Int, Runnable>()
-    private val longThresholdMs = 550L
-    private val doubleWindowMs = 350L
+    private val longThresholdMs = 500L
+    private val doubleWindowMs = 300L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -47,17 +47,18 @@ class VerlynSmartButtonService : AccessibilityService() {
         if (key != KeyEvent.KEYCODE_VOLUME_UP && key != KeyEvent.KEYCODE_VOLUME_DOWN) return super.onKeyEvent(event)
         val label = if (key == KeyEvent.KEYCODE_VOLUME_UP) "VOLUME_UP" else "VOLUME_DOWN"
         if (event.action == KeyEvent.ACTION_DOWN) {
-            if (event.repeatCount > 0) return key in downAt
+            if (event.repeatCount > 0) return true
             val now = System.currentTimeMillis()
             logKey("Key DOWN · " + label + " · device=" + event.deviceId)
             if (now - (lastTap[key] ?: 0L) <= doubleWindowMs) {
                 pendingShort.remove(key)?.let { handler.removeCallbacks(it) }
             }
             downAt[key] = now
-            longFired.remove(key)
+            longTasks.remove(key)?.let { handler.removeCallbacks(it) }
+            longPressTriggered.remove(key)
             val task = Runnable {
                 if (key in downAt) {
-                    longFired.add(key)
+                    longPressTriggered.add(key)
                     pendingShort.remove(key)?.let { handler.removeCallbacks(it) }
                     logKey("Long-hold detected · " + label + " · >= " + longThresholdMs + "ms")
                     runAction(slotFor(key, "long"))
@@ -72,7 +73,7 @@ class VerlynSmartButtonService : AccessibilityService() {
             downAt.remove(key)
             longTasks.remove(key)?.let { handler.removeCallbacks(it) }
             logKey("Key UP · " + label)
-            if (longFired.remove(key)) {
+            if (longPressTriggered.remove(key)) {
                 lastTap.remove(key)
                 return true
             }
@@ -101,7 +102,7 @@ class VerlynSmartButtonService : AccessibilityService() {
 
     private fun replayVolumeStep(key: Int) {
         val direction = if (key == KeyEvent.KEYCODE_VOLUME_UP) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
-        runCatching { audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, 0) }
+        runCatching { audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI) }
             .onFailure { logKey("Volume replay failed · " + (it.message ?: "unknown")) }
     }
 

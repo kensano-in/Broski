@@ -219,6 +219,9 @@ class MainActivity : ComponentActivity() {
     private var inspectorExpanded by mutableStateOf(true)
     private var writeTarget by mutableStateOf<GattCharacteristicRow?>(null)
     private var writeHexInput by mutableStateOf("")
+    private var manualRfcommTargetUuid by mutableStateOf(ClassicRfcommEngine.JBL_VENDOR_UUID.toString())
+    private var manualRfcommHex by mutableStateOf("")
+    private var engineMode by mutableStateOf("dynamics")
     private var eqEnabled by mutableStateOf(true)
     private var limiterEnabled by mutableStateOf(true)
     private var sessionCompatibility by mutableStateOf(true)
@@ -230,6 +233,8 @@ class MainActivity : ComponentActivity() {
     private val compatibilitySessions = mutableSetOf<Int>()
 
     private val preferences by lazy { getSharedPreferences("verlyn_audio_preferences", Context.MODE_PRIVATE) }
+
+    companion object { private const val ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL = "android.media.action.DISPLAY_AUDIO_EFFECT_CONTROL_PANEL" }
 
     private val serviceListener = object : BluetoothProfile.ServiceListener {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
@@ -587,6 +592,7 @@ class MainActivity : ComponentActivity() {
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         loadAudioPreferences()
         audioEngine = VerlynAudioRuntime.get(this)
+        audioEngine.setEngineMode(engineMode)
         audioEngine.setBassBoost(bassBoostEnabled)
         audioEngine.setSpatial(spatialEnabled)
         voiceAnnouncer = VoiceAnnouncer(this) { status ->
@@ -636,6 +642,7 @@ class MainActivity : ComponentActivity() {
             }
         )
         audioEngine.attachGlobal(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
+        handleAudioEffectPanelIntent(intent)
         refreshVolume()
         registerBluetoothReceiver()
         registerSmartActionReceiver()
@@ -699,7 +706,10 @@ class MainActivity : ComponentActivity() {
                     raceLog = raceCaptureLog.toList(),
                     ttsStatus = ttsStatus,
                     testAudioStatus = testAudioStatus,
-                    smartKeyStatus = smartKeyStatus
+                    smartKeyStatus = smartKeyStatus,
+                    engineMode = engineMode,
+                    manualRfcommTargetUuid = manualRfcommTargetUuid,
+                    manualRfcommHex = manualRfcommHex
                 ),
                 actions = VerlynProUiActions(
                     onTabChange = { selectedTab = it },
@@ -747,7 +757,7 @@ class MainActivity : ComponentActivity() {
                     onOpenAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                     onTestVoice = {
                         val time = SimpleDateFormat("h:mm a", Locale.US).format(Date())
-                        voiceAnnouncer.speak("It is " + time + ". Verlyn voice output test.")
+                        speakNow("It is " + time)
                         Toast.makeText(this@MainActivity, "TTS: " + ttsStatus, Toast.LENGTH_SHORT).show()
                     },
                     onNoiseModeChange = { VerlynConnectionService.requestNoiseMode(this@MainActivity, it) },
@@ -772,10 +782,34 @@ class MainActivity : ComponentActivity() {
                         mainHandler.postDelayed(audioApplyTask, 32L)
                     },
                     onTestEq = {
-                        saveAudioPreferences()
-                        eqTestPlayer.play(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
+                        if (testAudioStatus.contains("playing", true)) eqTestPlayer.stop()
+                        else {
+                            saveAudioPreferences()
+                            eqTestPlayer.play(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
+                        }
                     },
-                    onPowerOffHeadset = { VerlynConnectionService.requestPowerOff(this@MainActivity) }
+                    onPowerOffHeadset = { VerlynConnectionService.requestPowerOff(this@MainActivity) },
+                    onEngineModeChange = { mode ->
+                        engineMode = if (mode == "native") "native" else "dynamics"
+                        preferences.edit().putString("audio_engine_mode", engineMode).apply()
+                        audioEngine.setEngineMode(engineMode)
+                        applyAudioSettings()
+                        appendLog("EQ engine mode selected: " + engineMode)
+                    },
+                    onManualRfcommTargetChange = { manualRfcommTargetUuid = it },
+                    onManualRfcommHexChange = { manualRfcommHex = it },
+                    onSendRfcommHex = {
+                        val bytes = parseHex(manualRfcommHex)
+                        when {
+                            bytes == null || bytes.isEmpty() -> Toast.makeText(this@MainActivity, "Enter valid captured hex bytes", Toast.LENGTH_SHORT).show()
+                            bytes.size > 512 -> Toast.makeText(this@MainActivity, "Maximum RFCOMM payload is 512 bytes", Toast.LENGTH_SHORT).show()
+                            rfcommEngine.connectedUuid() != runCatching { UUID.fromString(manualRfcommTargetUuid) }.getOrNull() ->
+                                Toast.makeText(this@MainActivity, "Connect the selected RFCOMM endpoint first", Toast.LENGTH_SHORT).show()
+                            else -> {
+                                if (rfcommEngine.sendRaw(bytes)) appendLog("Manual RFCOMM hex sender queued ${bytes.size} byte(s)")
+                            }
+                        }
+                    },
                 )
             )
         }
@@ -1539,7 +1573,8 @@ class MainActivity : ComponentActivity() {
             else -> "Unavailable"
         }
         val dump = buildString {
-            appendLine("VERLYN 0.3.1 — COMPLETE AUDIO / BLUETOOTH DUMP")
+            appendLine("VERLYN 0.3.2 — COMPLETE AUDIO / BLUETOOTH DUMP")
+            appendLine("EQ engine mode: " + engineMode)
             appendLine("Device: " + (target?.let { safeDeviceName(it) } ?: "Not selected"))
             appendLine("Address: " + (target?.let { safeAddress(it) } ?: "Unavailable"))
             appendLine("BLE state: " + bleState)
@@ -1550,6 +1585,7 @@ class MainActivity : ComponentActivity() {
             appendLine("Firmware: " + if (firmwareVersion.isNotBlank()) "FW " + firmwareVersion else "Unavailable")
             appendLine("Model ID: " + modelId.ifBlank { "Unavailable" })
             appendLine("TTS engine: " + ttsStatus)
+            appendLine("EQ engine mode: " + engineMode)
             appendLine("Smart key engine: " + smartKeyStatus)
             appendLine("AudioEffect engine: " + audioEngine.statusForEffects())
             appendLine("Session compatibility: " + sessionCompatibility)
@@ -1622,6 +1658,7 @@ class MainActivity : ComponentActivity() {
         limiterEnabled = preferences.getBoolean("limiter_enabled", true)
         selectedPreset = preferences.getString("preset", "Flat") ?: "Flat"
         sessionCompatibility = preferences.getBoolean("session_compatibility", true)
+        engineMode = preferences.getString("audio_engine_mode", "dynamics") ?: "dynamics"
         clarityValue = preferences.getFloat("clarity", 0f).coerceIn(-6f, 6f)
         bassBoostEnabled = preferences.getBoolean("bass_boost_enabled", false)
         spatialEnabled = preferences.getBoolean("spatial_enabled", false)
@@ -1641,6 +1678,7 @@ class MainActivity : ComponentActivity() {
             .putFloat("clarity", clarityValue)
             .putBoolean("bass_boost_enabled", bassBoostEnabled)
             .putBoolean("spatial_enabled", spatialEnabled)
+            .putString("audio_engine_mode", engineMode)
             .apply()
         if (lastAppliedJblRoute == true) {
             preferences.edit()
@@ -1719,6 +1757,45 @@ class MainActivity : ComponentActivity() {
         } catch (error: Throwable) {
             Toast.makeText(this, "Media key unavailable: ${error.message ?: "unsupported"}", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun speakNow(message: String) {
+        appendLog("TTS request · " + message)
+        if (!voiceAnnouncer.speak(message)) appendLog("TTS request was not accepted · " + ttsStatus)
+    }
+
+    private fun handleAudioEffectPanelIntent(data: Intent?) {
+        if (data?.action != ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL) return
+        val sessionId = data.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, 0)
+        if (sessionId <= 0) {
+            appendLog("Spotify/system EQ panel intent received without a valid EXTRA_AUDIO_SESSION")
+            return
+        }
+        val mediaPackage = data.getStringExtra(AudioEffect.EXTRA_PACKAGE_NAME).orEmpty().ifBlank { "External media app" }
+        audioEngine.attachSession(
+            sessionId, mediaPackage, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled,
+            if (balanceEnabled) balance else 0f
+        )
+        val label = runCatching {
+            if (mediaPackage == "External media app") mediaPackage
+            else packageManager.getApplicationLabel(packageManager.getApplicationInfo(mediaPackage, 0)).toString()
+        }.getOrDefault(mediaPackage)
+        audioSessionBindings = (audioSessionBindings.filterNot { it.contains("Session " + sessionId) } +
+            (label + " (Session " + sessionId + ")")).distinct()
+        appendLog("System equalizer panel opened · " + label + " · audioSessionId=" + sessionId)
+        val serviceIntent = Intent(this, VerlynConnectionService::class.java)
+            .setAction(VerlynConnectionService.ACTION_AUDIO_SESSION_EVENT)
+            .putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
+            .putExtra(AudioEffect.EXTRA_PACKAGE_NAME, mediaPackage)
+            .putExtra(VerlynConnectionService.EXTRA_SESSION_OPEN, true)
+        runCatching { ContextCompat.startForegroundService(this, serviceIntent) }
+            .onFailure { appendLog("Could not hand off panel session to connection service · " + (it.message ?: "unknown")) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAudioEffectPanelIntent(intent)
     }
 
     override fun onResume() {

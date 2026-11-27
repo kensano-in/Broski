@@ -182,6 +182,7 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
                     }
                 }
             }
+            Text(s.noiseStatus.ifBlank { "No RFCOMM attempt yet" }, color = VMuted, fontSize = 9.sp)
         }
         PremiumCard {
             Text("QUICK AUDIO", fontWeight = FontWeight.Bold)
@@ -201,12 +202,23 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
     val haptic = LocalHapticFeedback.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PremiumCard {
+            Text(
+                s.audioSessionBindings.firstOrNull()?.let { "Bound: " + it + " · Active" }
+                    ?: "Not bound to player — Open Spotify Settings → Equalizer",
+                color = if (s.audioSessionBindings.isNotEmpty()) VGreen else VMuted,
+                fontSize = 9.sp
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("10-BAND EQUALIZER", fontWeight = FontWeight.Bold)
                     Text(s.selectedPreset, color = VBlueLight, fontSize = 10.sp)
                 }
                 Switch(s.eqEnabled, a.onEqEnabledChange)
+            }
+            Text("ENGINE MODE", color = VMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                FilterChip(selected = s.engineMode == "dynamics", onClick = { a.onEngineModeChange("dynamics") }, label = { Text("DynamicsProcessing (10-band)", fontSize = 10.sp) })
+                FilterChip(selected = s.engineMode == "native", onClick = { a.onEngineModeChange("native") }, label = { Text("Compatibility Equalizer (5-band Native)", fontSize = 10.sp) })
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("−12 dB", color = VMuted, fontSize = 9.sp)
@@ -222,6 +234,10 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 listOf("32", "64", "125", "250", "500", "1k", "2k", "4k", "8k", "16k").forEach { Text(it, color = VMuted, fontSize = 7.sp) }
             }
+            OutlinedButton(onClick = a.onTestEq, modifier = Modifier.fillMaxWidth()) {
+                Text(if (s.testAudioStatus.contains("playing", true)) "STOP TEST BEAT" else "TEST BEAT")
+            }
+            if (s.testAudioStatus.isNotBlank()) Text(s.testAudioStatus, color = VMuted, fontSize = 9.sp)
         }
         PremiumCard {
             Text("SOUND PROFILES", fontWeight = FontWeight.Bold)
@@ -259,12 +275,6 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
                 s.audioSessionBindings.forEach { binding ->
                     Text("Bound to " + binding, color = VBlueLight, fontSize = 9.sp)
                 }
-            }
-            OutlinedButton(onClick = a.onTestEq, modifier = Modifier.fillMaxWidth()) {
-                Text("PLAY TEST AUDIO")
-            }
-            if (s.testAudioStatus.isNotBlank()) {
-                Text(s.testAudioStatus, color = VMuted, fontSize = 9.sp)
             }
         }
     }
@@ -388,6 +398,34 @@ private fun InspectorTab(s: VerlynProUiState, a: VerlynProUiActions) {
             TextButton(onClick = a.onCopyDump) { Text("Copy diagnostic dump") }
             OutlinedButton(onClick = { confirmPowerOff = true }, modifier = Modifier.fillMaxWidth()) {
                 Text("Power off headset")
+            }
+        }
+        PremiumCard {
+            Text("RFCOMM HEX SENDER", color = VBlueLight, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(
+                    selected = s.manualRfcommTargetUuid == ClassicRfcommEngine.JBL_VENDOR_UUID.toString(),
+                    onClick = { a.onManualRfcommTargetChange(ClassicRfcommEngine.JBL_VENDOR_UUID.toString()) },
+                    label = { Text("JBL Vendor SPP", fontSize = 9.sp) }
+                )
+                FilterChip(
+                    selected = s.manualRfcommTargetUuid == ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID.toString(),
+                    onClick = { a.onManualRfcommTargetChange(ClassicRfcommEngine.AIROHA_RFCOMM_CANDIDATE_UUID.toString()) },
+                    label = { Text("Airoha RACE", fontSize = 9.sp) }
+                )
+            }
+            OutlinedTextField(
+                value = s.manualRfcommHex,
+                onValueChange = a.onManualRfcommHexChange,
+                label = { Text("HCI-captured frame hex") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2
+            )
+            Text("Paste exact bytes from the Bluetooth HCI capture. No ANC payloads are preloaded.", color = VMuted, fontSize = 9.sp)
+            Text("RFCOMM: " + s.rfcommState, color = VMuted, fontSize = 9.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { a.onRfcommConnect(s.manualRfcommTargetUuid) }, modifier = Modifier.weight(1f)) { Text("CONNECT") }
+                Button(onClick = a.onSendRfcommHex, modifier = Modifier.weight(1f)) { Text("SEND HEX") }
             }
         }
         if (s.classicSdpUuids.isNotEmpty()) PremiumCard {

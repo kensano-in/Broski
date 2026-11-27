@@ -7,12 +7,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.sin
 
-/** A short low-level chord/bass sample bound to its own AudioTrack session for DSP verification. */
+/** Continuous bass/synth test loop bound to its own AudioTrack session for DSP verification. */
 class EqTestAudioPlayer(
     private val engine: VerlynAudioEngine,
     private val onStatus: (String) -> Unit
@@ -62,19 +65,15 @@ class EqTestAudioPlayer(
                 engine.attachSession(sessionId, "VERLYN Test EQ", gains, preamp, eqEnabled, limiterEnabled, balance)
                 createdTrack.play()
                 onStatus("Test audio playing · Session " + sessionId)
-                val frameCount = sampleRate * TEST_DURATION_SECONDS
                 val blockFrames = 1_024
-                var frameOffset = 0
+                var frameOffset = 0L
                 val samples = ShortArray(blockFrames * 2)
-                while (frameOffset < frameCount) {
-                    val frames = minOf(blockFrames, frameCount - frameOffset)
+                while (currentCoroutineContext().isActive) {
+                    val frames = blockFrames
                     for (i in 0 until frames) {
-                        val frame = frameOffset + i
+                        val frame = frameOffset + i.toLong()
                         val t = frame.toDouble() / sampleRate.toDouble()
-                        val fadeIn = (t / 0.08).coerceIn(0.0, 1.0)
-                        val remain = (TEST_DURATION_SECONDS - t)
-                        val fadeOut = (remain / 0.25).coerceIn(0.0, 1.0)
-                        val envelope = minOf(fadeIn, fadeOut)
+                        val envelope = if (frame < sampleRate / 10) (frame.toDouble() / (sampleRate / 10)).coerceIn(0.0, 1.0) else 1.0
                         val bass = sin(2.0 * PI * 55.0 * t) * 0.10
                         val lowMid = sin(2.0 * PI * 110.0 * t) * 0.045
                         val chord = sin(2.0 * PI * 220.0 * t) * 0.035 +
@@ -88,10 +87,12 @@ class EqTestAudioPlayer(
                     }
                     val result = createdTrack.write(samples, 0, frames * 2, AudioTrack.WRITE_BLOCKING)
                     if (result < 0) throw IllegalStateException("AudioTrack write failed · code " + result)
-                    frameOffset += frames
+                    frameOffset += frames.toLong()
                 }
                 createdTrack.stop()
-                onStatus("Test audio finished · Session " + sessionId)
+                onStatus("Test Beat stopped · Session " + sessionId)
+            } catch (_: CancellationException) {
+                // Normal stop request; the finally block releases the session and track.
             } catch (error: Throwable) {
                 onStatus("Test audio failed · " + (error.message ?: error.javaClass.simpleName))
             } finally {
@@ -105,6 +106,7 @@ class EqTestAudioPlayer(
     }
 
     fun stop() {
+        val wasPlaying = currentTrack != null
         currentJob?.cancel()
         currentJob = null
         runCatching { currentTrack?.pause() }
@@ -114,6 +116,7 @@ class EqTestAudioPlayer(
         currentTrack = null
         currentSessionId?.let { engine.detachSession(it) }
         currentSessionId = null
+        if (wasPlaying) onStatus("Test Beat stopped")
     }
 
     fun shutdown() {
@@ -121,7 +124,4 @@ class EqTestAudioPlayer(
         scope.cancel()
     }
 
-    companion object {
-        private const val TEST_DURATION_SECONDS = 6
-    }
 }

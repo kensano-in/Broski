@@ -98,6 +98,30 @@ class ClassicRfcommEngine(
 
     fun connectedUuid(): UUID? = activeUuid ?: requestedUuid
 
+    fun sendRaw(bytes: ByteArray): Boolean {
+        val active = socket ?: run {
+            onStatus("RFCOMM TX blocked · no active socket")
+            return false
+        }
+        if (bytes.isEmpty() || bytes.size > 512) {
+            onStatus("RFCOMM TX blocked · payload must be 1..512 bytes")
+            return false
+        }
+        val payload = bytes.copyOf()
+        scope.launch {
+            try {
+                if (socket !== active) throw IllegalStateException("RFCOMM socket changed before send")
+                active.outputStream.write(payload)
+                active.outputStream.flush()
+                val hex = payload.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+                onStatus("RFCOMM TX · UUID=" + (activeUuid ?: "unknown") + " · HEX[" + hex + "]")
+            } catch (error: Throwable) {
+                onStatus("RFCOMM TX failed · " + (error.message ?: error.javaClass.simpleName))
+            }
+        }
+        return true
+    }
+
     private suspend fun readLoop(active: BluetoothSocket, uuid: UUID, token: Int, onPeerClosed: (Boolean) -> Unit) {
         val input: InputStream = active.inputStream
         val buffer = ByteArray(2048)

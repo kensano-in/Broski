@@ -27,6 +27,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import java.util.ArrayList
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -158,7 +159,11 @@ class VerlynConnectionService : Service() {
         createNotificationChannel()
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         VerlynAudioRuntime.get(this)
-        race = AirohaRaceClient { line -> main.post { appendRaceLog(line) } }
+        race = AirohaRaceClient { line -> main.post {
+            noiseDetail = line
+            appendRaceLog(line)
+            publishState()
+        } }
         rfcomm = ClassicRfcommEngine(
             onStatus = { value -> main.post {
                 linkStatus = value
@@ -443,8 +448,7 @@ class VerlynConnectionService : Service() {
             addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
             addAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION)
         }
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(audioSessionReceiver, filter, Context.RECEIVER_EXPORTED)
-        else registerReceiver(audioSessionReceiver, filter)
+        ContextCompat.registerReceiver(this, audioSessionReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
         val aux = IntentFilter(ACTION_AUX_CHANGED)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(auxiliaryReceiver, aux, Context.RECEIVER_NOT_EXPORTED)
         else registerReceiver(auxiliaryReceiver, aux)
@@ -501,7 +505,8 @@ class VerlynConnectionService : Service() {
             bindAudioSession(sessionId, packageName, "AudioEffect broadcast")
         } else {
             intentSessionIds.remove(sessionId)
-            unbindAudioSession(sessionId, "AudioEffect close")
+            if (sessionId !in playbackSessionIds) unbindAudioSession(sessionId, "AudioEffect close")
+            else appendRaceLog("AudioEffect close received; keeping active playback session " + sessionId)
         }
     }
 

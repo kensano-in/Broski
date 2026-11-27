@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
+import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
@@ -103,7 +104,10 @@ class VoiceAnnouncer(
             setStatus("TTS audio focus denied · code " + focusResult)
             return false
         }
-        val result = tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "verlyn-" + System.nanoTime())
+        val params = Bundle().apply {
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+        }
+        val result = tts.speak(message, TextToSpeech.QUEUE_FLUSH, params, "verlyn-" + System.nanoTime())
         if (result == TextToSpeech.ERROR) {
             setStatus("TTS speak request rejected")
             abandonFocus()

@@ -89,7 +89,10 @@ data class VerlynProUiState(
     val raceLog: List<String> = emptyList(),
     val ttsStatus: String = "TTS initializing",
     val testAudioStatus: String = "",
-    val smartKeyStatus: String = "Waiting for volume-key input"
+    val smartKeyStatus: String = "Waiting for volume-key input",
+    val engineMode: String = "dynamics",
+    val manualRfcommTargetUuid: String = ClassicRfcommEngine.JBL_VENDOR_UUID.toString(),
+    val manualRfcommHex: String = ""
 )
 
 data class VerlynProUiActions(
@@ -123,7 +126,11 @@ data class VerlynProUiActions(
     val onSpatialChange: (Boolean) -> Unit = {},
     val onClarityChange: (Float) -> Unit = {},
     val onTestEq: () -> Unit = {},
-    val onPowerOffHeadset: () -> Unit = {}
+    val onPowerOffHeadset: () -> Unit = {},
+    val onEngineModeChange: (String) -> Unit = {},
+    val onManualRfcommTargetChange: (String) -> Unit = {},
+    val onManualRfcommHexChange: (String) -> Unit = {},
+    val onSendRfcommHex: () -> Unit = {}
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)

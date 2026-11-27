@@ -118,7 +118,7 @@ class AirohaRaceClient(private val onLog: (String) -> Unit) {
                 socket = candidate.create()
                 socket.connect()
                 activeSocket = socket
-                onLog("RACE CONNECT success · " + candidate.label)
+                onLog(if (candidate.label.contains("channel 21", true)) "RFCOMM Ch 21 connected · " + candidate.label else "RFCOMM socket connected · " + candidate.label)
                 val input = socket.inputStream
                 val output = socket.outputStream
                 writeRequest(output, GET_NOISE_OPCODE, byteArrayOf(0x05, 0x00))

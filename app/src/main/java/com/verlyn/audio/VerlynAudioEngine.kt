@@ -26,6 +26,7 @@ class VerlynAudioEngine(
     @Volatile private var spatialEnabled = false
     @Volatile private var routeActive = false
     @Volatile private var lastConfig = EffectConfig()
+    @Volatile private var preferredEngine = "dynamics"
 
     private data class EffectConfig(
         val gains: FloatArray = FloatArray(10),
@@ -42,8 +43,22 @@ class VerlynAudioEngine(
     @Synchronized
     fun attachGlobal(gains: FloatArray, preamp: Float, eqEnabled: Boolean, limiterEnabled: Boolean, balance: Float = 0f) {
         lastConfig = EffectConfig(gains.copyOf(), preamp, eqEnabled, limiterEnabled, balance)
+        sessionPackages[0] = "Global Mix"
         attach(0, "Global Mix", lastConfig)
     }
+
+    @Synchronized
+    fun setEngineMode(mode: String) {
+        preferredEngine = if (mode.equals("native", true)) "native" else "dynamics"
+        val ids = (sessionPackages.keys + dynamics.keys + equalizers.keys).distinct()
+        ids.forEach { sessionId ->
+            val packageName = sessionPackages[sessionId] ?: if (sessionId == 0) "Global Mix" else "Unknown app"
+            attach(sessionId, packageName, lastConfig)
+        }
+        onStatus(statusForEffects())
+    }
+
+    fun currentEngineMode(): String = preferredEngine
 
     @Synchronized
     fun attachSession(
@@ -64,10 +79,14 @@ class VerlynAudioEngine(
     @Synchronized
     private fun attach(sessionId: Int, packageName: String, config: EffectConfig) {
         releaseSessionEffects(sessionId)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        if (preferredEngine == "dynamics" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {
+                val preEqInUse = true
+                val limiterInUse = true
                 val preEq = buildEq(config.gains, config.eqEnabled)
+                preEq.setEnabled(true)
                 val postEq = buildEq(FloatArray(BAND_FREQUENCIES.size), true)
+                postEq.setEnabled(true)
                 val limiter = DynamicsProcessing.Limiter(
                     true, config.limiterEnabled, 0, 10f, 100f, 20f, -1f, 0f
                 )
@@ -76,10 +95,10 @@ class VerlynAudioEngine(
                 val builder = DynamicsProcessing.Config.Builder(
                     DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
                     2,
-                    true, BAND_FREQUENCIES.size,
+                    preEqInUse, BAND_FREQUENCIES.size,
                     true, BAND_FREQUENCIES.size,
                     false, 0,
-                    true
+                    limiterInUse
                 )
                     .setInputGainAllChannelsTo(config.preamp.coerceIn(-12f, 12f))
                     .setPreEqAllChannelsTo(preEq)
@@ -119,8 +138,8 @@ class VerlynAudioEngine(
                     DynamicsProcessing.EqBand(
                         true,
                         BAND_FREQUENCIES[index],
-                        gains.getOrElse(index) { 0f }.coerceIn(-12f, 12f)
-                    )
+                        (if (enabled) gains.getOrElse(index) { 0f } else 0f).coerceIn(-12f, 12f)
+                    ).also { band -> band.setEnabled(true) }
                 )
             }
         }
@@ -144,12 +163,12 @@ class VerlynAudioEngine(
             }
             applyLegacyEq(eq, config.gains, config.eqEnabled)
             eq.enabled = config.eqEnabled
-            if (!eq.enabled || !eq.hasControl()) {
+            if (eq.enabled != config.eqEnabled || !eq.hasControl()) {
                 eq.release()
                 throw IllegalStateException("Equalizer failed enabled/control check")
             }
             equalizers[sessionId] = eq
-            engineNames[sessionId] = "Android Equalizer"
+            engineNames[sessionId] = "Compatibility Equalizer (" + eq.numberOfBands + "-band Native)"
             applyAuxEffects(sessionId)
             true
         }.getOrDefault(false)
@@ -248,18 +267,16 @@ class VerlynAudioEngine(
     }
 
     private fun applyAuxEffects(sessionId: Int) {
-        if (bassBoostEnabled) {
-            runCatching {
-                val bass = bassEffects[sessionId] ?: BassBoost(0, sessionId).also { bassEffects[sessionId] = it }
-                if (!bass.hasControl()) throw IllegalStateException("BassBoost hasControl=false")
-                bass.setStrength(900.toShort())
-                bass.enabled = true
-                if (!bass.enabled || !bass.hasControl()) throw IllegalStateException("BassBoost failed enabled/control check")
-            }.onFailure {
-                bassEffects.remove(sessionId)?.let { effect -> runCatching { effect.release() } }
-                onStatus("Session $sessionId · BassBoost unavailable: " + (it.message ?: "no control"))
-            }
-        } else bassEffects.remove(sessionId)?.let { runCatching { it.release() } }
+        runCatching {
+            val bass = bassEffects[sessionId] ?: BassBoost(0, sessionId).also { bassEffects[sessionId] = it }
+            if (!bass.hasControl()) throw IllegalStateException("BassBoost hasControl=false")
+            if (bassBoostEnabled) bass.setStrength(900.toShort())
+            bass.enabled = bassBoostEnabled
+            if (bass.enabled != bassBoostEnabled || !bass.hasControl()) throw IllegalStateException("BassBoost failed enabled/control check")
+        }.onFailure {
+            bassEffects.remove(sessionId)?.let { effect -> runCatching { effect.release() } }
+            onStatus("Session $sessionId · BassBoost unavailable: " + (it.message ?: "no control"))
+        }
 
         if (spatialEnabled) {
             runCatching {
