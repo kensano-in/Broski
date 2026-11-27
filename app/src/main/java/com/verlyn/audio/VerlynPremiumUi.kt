@@ -121,8 +121,9 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
         ) {
             val bound = s.audioSessionBindings.firstOrNull() ?: "No media session"
             val auto = if (s.companionConfigured && s.audioConnected) "ON" else "STANDBY"
+            val activeDsp = s.effectStatus.substringBefore(" · ").ifBlank { s.engineMode.uppercase(Locale.US) }
             Text(
-                ("APP " + bound + "  ·  DSP " + s.engineMode.uppercase(Locale.US) +
+                ("APP " + bound + "  ·  DSP " + activeDsp +
                     "  ·  CODEC " + s.codecStatus + "  ·  AUTO " + auto).take(160),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
                 color = VMuted,
@@ -130,10 +131,13 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
                 maxLines = 1
             )
         }
-        if (!s.companionConfigured || !s.batteryUnrestricted || !s.assistantSelected) {
+        if (!s.quickSetupDismissed && (!s.companionConfigured || !s.batteryUnrestricted || !s.assistantSelected)) {
             PremiumCard {
-                Text("QUICK SETUP", color = VBlueLight, fontWeight = FontWeight.Bold)
-                Text("This checklist disappears when all three setup steps are complete.", color = VMuted, fontSize = 10.sp)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("QUICK SETUP", modifier = Modifier.weight(1f), color = VBlueLight, fontWeight = FontWeight.Bold)
+                    TextButton(onClick = a.onDismissQuickSetup) { Text("DISMISS", color = VMuted, fontSize = 9.sp) }
+                }
+                Text("Complete these three steps for connected-headset wake-up.", color = VMuted, fontSize = 10.sp)
                 Setting("Smart Auto-Connect", if (s.companionConfigured) "JBL association saved" else "Associate JBL Tune 770NC") {
                     Button(onClick = a.onAssociateHeadset, enabled = !s.companionConfigured, colors = ButtonDefaults.buttonColors(containerColor = VBlue)) { Text(if (s.companionConfigured) "DONE" else "SET UP") }
                 }
@@ -491,7 +495,7 @@ private fun SmartTab(s: VerlynProUiState, a: VerlynProUiActions, pick: (String) 
         PremiumCard {
             Text("EQ SCROLL MODE", fontWeight = FontWeight.Bold)
             Text("Vol + / Vol − selects the next or previous preset. Each change is previewed for four seconds; five seconds of inactivity locks the preset.", color = VMuted, fontSize = 10.sp)
-            Text("Sleep timer cycles 15 · 30 · 45 · 60 minutes · Off.", color = VMuted, fontSize = 10.sp)
+            Text("Sleep timer command cycles 15 · 30 · 60 minutes · Off.", color = VMuted, fontSize = 10.sp)
         }
         PremiumCard {
             Text("PER-APP AUTO EQ", color = VBlueLight, fontWeight = FontWeight.Bold)
@@ -745,21 +749,21 @@ private fun routeText(route: String): String = when {
     else -> route.take(54)
 }
 private val smartOptions = listOf(
-    "speak_time" to "Speak current time",
-    "speak_battery" to "Speak headset & phone battery",
-    "cycle_eq" to "Cycle EQ preset",
-    "toggle_bass_boost" to "Toggle bass boost",
-    "toggle_limiter" to "Toggle volume cap",
-    "media_next" to "Next track",
-    "media_previous" to "Previous track",
-    "media_play_pause" to "Play / pause",
-    "disabled" to "Off"
+    "speak_battery" to "Speak Battery",
+    "enter_eq_scroll" to "Enter EQ Scroll Mode",
+    "toggle_bass_boost" to "Toggle Bass Boost",
+    "cycle_sleep_timer" to "Cycle Sleep Timer",
+    "toggle_spatial" to "Toggle Spatial Audio",
+    "toggle_volume_cap" to "Toggle Volume Cap",
+    "speak_full_briefing" to "Speak Full Briefing",
+    "disabled" to "Disabled"
 )
 private val slots = listOf(
-    Triple("trigger_volume_down_long", "Long-hold · Volume Down", "speak_time"),
-    Triple("trigger_volume_up_long", "Long-hold · Volume Up", "speak_battery"),
-    Triple("trigger_volume_down_double", "Double-press · Volume Down", "cycle_eq"),
-    Triple("trigger_volume_up_double", "Double-press · Volume Up", "toggle_limiter")
+    Triple("command_vol_up_single", "Vol + · single tap", "speak_battery"),
+    Triple("command_vol_down_single", "Vol − · single tap", "enter_eq_scroll"),
+    Triple("command_vol_up_double", "Vol + · double tap", "toggle_bass_boost"),
+    Triple("command_vol_down_double", "Vol − · double tap", "cycle_sleep_timer"),
+    Triple("command_center_long_hold", "Centre · long-hold again", "speak_full_briefing")
 )
 private fun actionName(id: String): String = smartOptions.firstOrNull { it.first == id }?.second ?: "Off"
 private fun slotName(id: String): String = slots.firstOrNull { it.first == id }?.second ?: id

@@ -4,7 +4,6 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,7 +13,7 @@ import android.view.KeyEvent
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Serialized media-routed speech with exclusive focus and an explicit pause/resume fallback. */
+/** Media-routed TTS with an explicit exclusive-focus session for headset Command Mode. */
 class VoiceAnnouncer(
     context: Context,
     private val onUtteranceFinished: () -> Unit = {},
@@ -31,21 +30,23 @@ class VoiceAnnouncer(
         .setUsage(AudioAttributes.USAGE_ASSISTANT)
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
         .build()
-    private val focusRequest = if (Build.VERSION.SDK_INT >= 26) {
-        AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-            .setAudioAttributes(focusAttributes)
-            .setOnAudioFocusChangeListener { }
-            .setAcceptsDelayedFocusGain(false)
-            .build()
-    } else null
+    private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+        .setAudioAttributes(focusAttributes)
+        .setOnAudioFocusChangeListener({}, handler)
+        .setAcceptsDelayedFocusGain(false)
+        .build()
     private val ready = AtomicBoolean(false)
-    @Volatile private var pendingText: String? = null
-    @Volatile private var engineName = "Unknown TTS engine"
     @Volatile private var statusText = "TTS initializing"
+    private var pendingText: String? = null
+    private var pendingKeepFocus = false
+    private var pendingSpeechText: String? = null
+    private var engineName = "Unknown TTS engine"
     private var focusHeld = false
     private var pausedViaMediaKey = false
+    private var retainFocusAfterUtterance = false
     private var activeUtteranceId: String? = null
     private var finishingUtteranceId: String? = null
+    private var focusStartTask: Runnable? = null
     private var sequence = 0L
     private val tts = TextToSpeech(appContext, this)
 
@@ -78,20 +79,16 @@ class VoiceAnnouncer(
             override fun onStart(utteranceId: String?) {
                 setStatus("TTS onStart · " + (utteranceId ?: "unknown") + " · " + engineName)
             }
-
             override fun onDone(utteranceId: String?) {
                 finishUtterance(utteranceId, "TTS onDone")
             }
-
             @Deprecated("Deprecated by platform")
             override fun onError(utteranceId: String?) {
                 finishUtterance(utteranceId, "TTS onError")
             }
-
             override fun onError(utteranceId: String?, errorCode: Int) {
                 finishUtterance(utteranceId, "TTS onError(code=$errorCode)")
             }
-
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
                 finishUtterance(utteranceId, if (interrupted) "TTS stopped · interrupted" else "TTS stopped")
             }
@@ -99,74 +96,111 @@ class VoiceAnnouncer(
         ready.set(true)
         setStatus("TTS Ready: " + engineName)
         val queued = pendingText
+        val keepFocus = pendingKeepFocus
         pendingText = null
-        if (queued != null) speak(queued)
+        pendingKeepFocus = false
+        if (queued != null) speak(queued, keepFocusAfter = keepFocus)
+    }
+
+    fun beginCommandSession() {
+        handler.post {
+            retainFocusAfterUtterance = true
+            setStatus("Command Mode · exclusive focus session armed")
+        }
+    }
+
+    fun endCommandSession() {
+        handler.post {
+            retainFocusAfterUtterance = false
+            if (activeUtteranceId == null) releaseExclusiveFocus()
+        }
     }
 
     @Synchronized
-    fun speak(message: String): Boolean {
-        if (!ready.get()) {
-            pendingText = message
-            setStatus("TTS initializing · request queued")
-            return true
-        }
+    fun speak(message: String, keepFocusAfter: Boolean = false): Boolean {
         handler.post {
+            retainFocusAfterUtterance = keepFocusAfter
             if (!ready.get()) {
                 pendingText = message
+                pendingKeepFocus = keepFocusAfter
+                setStatus("TTS initializing · request queued")
                 return@post
             }
-            if (focusHeld) {
+            if (activeUtteranceId != null) {
                 pendingText = message
-                activeUtteranceId?.let { current ->
-                    runCatching { tts.stop() }
-                    if (finishingUtteranceId != current) finishUtterance(current, "TTS replaced by newer request")
+                pendingKeepFocus = keepFocusAfter
+                val current = activeUtteranceId
+                runCatching { tts.stop() }
+                if (current != null && finishingUtteranceId != current) {
+                    finishUtterance(current, "TTS replaced by newer request")
                 }
                 return@post
             }
-            beginWithExclusiveFocus(message)
+            if (focusHeld) beginWithHeldFocus(message) else beginWithExclusiveFocus(message)
         }
         return true
     }
 
     private fun beginWithExclusiveFocus(message: String) {
-        val focusResult = if (Build.VERSION.SDK_INT >= 26) {
-            audioManager.requestAudioFocus(focusRequest!!)
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-        }
+        val focusResult = audioManager.requestAudioFocus(focusRequest)
         if (focusResult != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             setStatus("TTS exclusive audio focus denied · code " + focusResult)
+            onUtteranceFinished()
             return
         }
         focusHeld = true
         pausedViaMediaKey = false
-        val id = "verlyn-" + (++sequence)
-        activeUtteranceId = id
+        beginUtterance(message)
+        prepareSpeechAfterMusicPause()
+    }
+
+    private fun beginWithHeldFocus(message: String) {
+        beginUtterance(message)
+        if (focusStartTask != null) prepareSpeechAfterMusicPause()
+        else startSpeech(activeUtteranceId!!, message)
+    }
+
+    private fun beginUtterance(message: String) {
+        activeUtteranceId = "verlyn-" + (++sequence)
         finishingUtteranceId = null
-        setStatus("Exclusive audio focus acquired · waiting 200ms for Spotify pause")
-        handler.postDelayed({
-            if (activeUtteranceId != id || !focusHeld) return@postDelayed
-            if (audioManager.isMusicActive) {
+        pendingSpeechText = message
+        setStatus("Exclusive focus held · preparing speech")
+    }
+
+    private fun prepareSpeechAfterMusicPause() {
+        focusStartTask?.let { handler.removeCallbacks(it) }
+        val id = activeUtteranceId ?: return
+        val message = pendingSpeechText ?: return
+        val task = Runnable {
+            focusStartTask = null
+            if (activeUtteranceId != id || !focusHeld) return@Runnable
+            if (audioManager.isMusicActive && !pausedViaMediaKey) {
                 pausedViaMediaKey = true
                 dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE)
-                setStatus("Spotify still active · MEDIA_PAUSE fallback sent")
+                setStatus("Music still active after 200ms · MEDIA_PAUSE fallback sent")
             } else {
-                setStatus("Music paused by exclusive audio focus")
+                setStatus("Music paused for Verlyn speech")
             }
             handler.postDelayed({
-                if (activeUtteranceId != id || !focusHeld) return@postDelayed
-                val params = Bundle().apply {
-                    putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
-                }
-                val result = tts.speak(message, TextToSpeech.QUEUE_FLUSH, params, id)
-                if (result == TextToSpeech.ERROR) {
-                    finishUtterance(id, "TTS onError(code=${TextToSpeech.ERROR})")
-                } else {
-                    setStatus("TTS speaking · " + engineName)
-                }
+                if (activeUtteranceId == id && focusHeld) startSpeech(id, message)
             }, 150L)
-        }, 200L)
+        }
+        focusStartTask = task
+        handler.postDelayed(task, 200L)
+    }
+
+    private fun startSpeech(id: String, message: String) {
+        if (activeUtteranceId != id || !focusHeld) return
+        pendingSpeechText = null
+        val params = Bundle().apply {
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+        }
+        val result = tts.speak(message, TextToSpeech.QUEUE_FLUSH, params, id)
+        if (result == TextToSpeech.ERROR) {
+            finishUtterance(id, "TTS onError(code=" + TextToSpeech.ERROR + ")")
+        } else {
+            setStatus("TTS speaking · " + engineName)
+        }
     }
 
     private fun finishUtterance(utteranceId: String?, result: String) {
@@ -174,40 +208,48 @@ class VoiceAnnouncer(
         handler.post {
             if (activeUtteranceId != utteranceId || finishingUtteranceId == utteranceId) return@post
             finishingUtteranceId = utteranceId
-            setStatus(result + " · resume timer 250ms")
+            setStatus(result + " · finishing")
             handler.postDelayed({
                 if (activeUtteranceId != utteranceId) return@postDelayed
                 activeUtteranceId = null
                 finishingUtteranceId = null
-                abandonExclusiveFocus()
-                if (pausedViaMediaKey) {
-                    dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
-                    setStatus(result + " · MEDIA_PLAY fallback sent")
-                } else {
-                    setStatus("TTS Ready: " + engineName + " · audio focus abandoned")
-                }
-                pausedViaMediaKey = false
                 val queued = pendingText
+                val keepFocus = pendingKeepFocus
                 pendingText = null
-                if (queued != null) beginWithExclusiveFocus(queued)
-                else onUtteranceFinished()
+                pendingKeepFocus = false
+                if (queued != null) {
+                    retainFocusAfterUtterance = keepFocus
+                    if (focusHeld) beginWithHeldFocus(queued) else beginWithExclusiveFocus(queued)
+                    return@postDelayed
+                }
+                if (retainFocusAfterUtterance) {
+                    setStatus("TTS complete · Command Mode retains exclusive focus")
+                } else {
+                    releaseExclusiveFocus()
+                    setStatus("TTS Ready: " + engineName + " · audio focus released")
+                }
+                onUtteranceFinished()
             }, 250L)
         }
+    }
+
+    private fun releaseExclusiveFocus() {
+        focusStartTask?.let { handler.removeCallbacks(it) }
+        focusStartTask = null
+        if (focusHeld) {
+            runCatching { audioManager.abandonAudioFocusRequest(focusRequest) }
+            focusHeld = false
+        }
+        if (pausedViaMediaKey) {
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
+            setStatus("MEDIA_PLAY fallback sent · playback resumed")
+        }
+        pausedViaMediaKey = false
     }
 
     private fun dispatchMediaKey(code: Int) {
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
-    }
-
-    private fun abandonExclusiveFocus() {
-        if (!focusHeld) return
-        if (Build.VERSION.SDK_INT >= 26) focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-        else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(null)
-        }
-        focusHeld = false
     }
 
     private fun setStatus(value: String) {
@@ -219,11 +261,12 @@ class VoiceAnnouncer(
         handler.post {
             handler.removeCallbacksAndMessages(null)
             runCatching { tts.stop(); tts.shutdown() }
-            abandonExclusiveFocus()
-            if (pausedViaMediaKey) dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
-            pausedViaMediaKey = false
             activeUtteranceId = null
             finishingUtteranceId = null
+            pendingText = null
+            pendingSpeechText = null
+            retainFocusAfterUtterance = false
+            releaseExclusiveFocus()
             ready.set(false)
             setStatus("TTS stopped")
         }

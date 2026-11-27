@@ -39,13 +39,13 @@ class VerlynAssistantSessionService : VoiceInteractionSessionService() {
         VerlynAssistantSession(this)
 }
 
-private class VerlynAssistantSession(context: android.content.Context) : VoiceInteractionSession(context) {
+private class VerlynAssistantSession(private val appContext: android.content.Context) : VoiceInteractionSession(appContext) {
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
         runCatching {
             androidx.core.content.ContextCompat.startForegroundService(
-                context,
-                Intent(context, VerlynConnectionService::class.java)
+                appContext,
+                Intent(appContext, VerlynConnectionService::class.java)
                     .setAction(VerlynConnectionService.ACTION_COMMAND_ASSIST)
             )
         }

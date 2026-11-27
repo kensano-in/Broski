@@ -61,9 +61,12 @@ class BluetoothConnectionReceiver : BroadcastReceiver() {
         val preferences = context.getSharedPreferences("verlyn_audio_preferences", Context.MODE_PRIVATE)
         val associated = preferences.getString("companion_mac", "").orEmpty()
         val name = runCatching { device.name.orEmpty() }.getOrDefault("")
-        if (!(associated.isNotBlank() && associated.equals(device.address, true)) &&
-            !name.contains("JBL Tune 770NC", true) && !name.contains("JBL Tune770NC", true)
-        ) return
+        val isAssociatedDevice = if (associated.isNotBlank()) {
+            associated.equals(device.address, true)
+        } else {
+            name.contains("JBL Tune 770NC", true) || name.contains("JBL Tune770NC", true)
+        }
+        if (!isAssociatedDevice) return
 
         when (intent.action) {
             BluetoothDevice.ACTION_ACL_CONNECTED -> start(context)

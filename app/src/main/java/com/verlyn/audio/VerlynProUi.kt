@@ -89,7 +89,7 @@ data class VerlynProUiState(
     val raceLog: List<String> = emptyList(),
     val ttsStatus: String = "TTS initializing",
     val testAudioStatus: String = "",
-    val smartKeyStatus: String = "Waiting for volume-key input",
+    val smartKeyStatus: String = "Waiting for headset assistant command",
     val engineMode: String = "native",
     val headsetGesturesEnabled: Boolean = false,
     val headsetTriggerActions: Map<String, String> = emptyMap(),
@@ -98,6 +98,7 @@ data class VerlynProUiState(
     val companionConfigured: Boolean = false,
     val batteryUnrestricted: Boolean = false,
     val assistantSelected: Boolean = false,
+    val quickSetupDismissed: Boolean = false,
     val nativeBandCentersHz: List<Int> = emptyList(),
     val audioBypassed: Boolean = false,
     val bassPunch: Float = 0f,
@@ -151,6 +152,7 @@ data class VerlynProUiActions(
     val onAssociateHeadset: () -> Unit = {},
     val onRequestBatteryUnrestricted: () -> Unit = {},
     val onOpenVoiceInputSettings: () -> Unit = {},
+    val onDismissQuickSetup: () -> Unit = {},
     val onEqBypassChange: (Boolean) -> Unit = {},
     val onMbcTuningChange: (String, Float) -> Unit = { _, _ -> },
     val onBassStrengthChange: (Float) -> Unit = {},
@@ -159,23 +161,6 @@ data class VerlynProUiActions(
     val onAutoEqRuleChange: (String, String) -> Unit = { _, _ -> }
 )
 
-private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)
-private val triggerSlots = listOf(
-    TriggerSlot("trigger_volume_down_long", "Long-hold · Volume Down", "speak_time"),
-    TriggerSlot("trigger_volume_up_long", "Long-hold · Volume Up", "speak_battery"),
-    TriggerSlot("trigger_volume_down_double", "Double-press · Volume Down", "cycle_eq"),
-    TriggerSlot("trigger_volume_up_double", "Double-press · Volume Up", "toggle_limiter")
-)
-private val smartActionOptions = listOf(
-    "speak_time" to "Speak exact current time",
-    "speak_battery" to "Speak battery status",
-    "cycle_eq" to "Cycle saved EQ presets",
-    "toggle_limiter" to "Toggle max volume limiter",
-    "media_next" to "Media · Next",
-    "media_previous" to "Media · Previous",
-    "media_play_pause" to "Media · Play / Pause",
-    "disabled" to "Disabled"
-)
 private val builtInPresetNames = listOf("Flat", "Studio", "Bass", "Club", "Extreme Bass", "Vocal", "Jazz", "Podcast", "Gaming")
 private val eqLabels = listOf("32", "64", "125", "250", "500", "1k", "2k", "4k", "8k", "16k")
 
@@ -450,55 +435,65 @@ private fun ProEqualizerPage(state: VerlynProUiState, actions: VerlynProUiAction
 
 @Composable
 private fun SmartActionsPage(state: VerlynProUiState, actions: VerlynProUiActions) {
+    val commandSlots = listOf(
+        Triple("command_vol_up_single", "Vol + · single tap", "speak_battery"),
+        Triple("command_vol_down_single", "Vol − · single tap", "enter_eq_scroll"),
+        Triple("command_vol_up_double", "Vol + · double tap", "toggle_bass_boost"),
+        Triple("command_vol_down_double", "Vol − · double tap", "cycle_sleep_timer"),
+        Triple("command_center_long_hold", "Centre · long-hold again", "speak_full_briefing")
+    )
+    val commandOptions = listOf(
+        "speak_battery" to "Speak Battery",
+        "enter_eq_scroll" to "Enter EQ Scroll Mode",
+        "toggle_bass_boost" to "Toggle Bass Boost",
+        "cycle_sleep_timer" to "Cycle Sleep Timer",
+        "toggle_spatial" to "Toggle Spatial Audio",
+        "toggle_volume_cap" to "Toggle Volume Cap",
+        "speak_full_briefing" to "Speak Full Briefing",
+        "disabled" to "Disabled"
+    )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ProCard {
-            Text("SMART BUTTONS", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-            Text("Map volume-key gestures to Verlyn actions. Android requires the optional Accessibility Service to intercept key events.", color = VMuted, fontSize = 10.sp)
+            Text("HEADSET COMMAND MODE", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = VBlueLight)
+            Text("Long-hold the JBL centre button to open Command Mode. Volume keys remain ordinary volume controls outside that window; a single centre tap stays native.", color = VMuted, fontSize = 10.sp)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Verlyn Smart Button Service", fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
-                    Text(if (state.accessibilityEnabled) "Enabled" else "Not enabled", color = if (state.accessibilityEnabled) VGreen else VOrange, fontSize = 10.sp)
+                    Text("Android Digital Assistant", fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
+                    Text(if (state.assistantSelected) "Verlyn is selected" else "Select Verlyn as the default assistant", color = if (state.assistantSelected) VGreen else VMuted, fontSize = 10.sp)
                 }
-                Button(onClick = actions.onOpenAccessibilitySettings, colors = ButtonDefaults.buttonColors(containerColor = VBlue)) {
-                    Text(if (state.accessibilityEnabled) "OPEN SETTINGS" else "SET UP")
+                Button(onClick = actions.onOpenVoiceInputSettings, colors = ButtonDefaults.buttonColors(containerColor = VBlue)) {
+                    Text(if (state.assistantSelected) "SETTINGS" else "SET DEFAULT")
                 }
             }
             Button(onClick = actions.onTestVoice, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = VZinc2)) {
-                Text("TEST VOICE OUTPUT IN HEADSET")
+                Text("TEST VOICE OUTPUT")
             }
-            Text("Announcements request transient may-duck audio focus and follow Android's current output route; Verlyn cannot force TTS into a specific headset.", color = VMuted, fontSize = 9.sp)
         }
         ProCard {
-            Text("GESTURE ASSIGNMENTS", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            triggerSlots.forEach { slot ->
+            Text("COMMAND WINDOW · 5 SECONDS", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            commandSlots.forEach { slot ->
                 Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text(slot.title, color = VWhite, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                    var expanded by remember(slot.id) { mutableStateOf(false) }
-                    val selected = state.triggerActions[slot.id] ?: slot.defaultAction
+                    Text(slot.second, color = VWhite, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    var expanded by remember(slot.first) { mutableStateOf(false) }
+                    val selected = state.headsetTriggerActions[slot.first] ?: slot.third
                     Box {
                         OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth(), border = BorderStroke(1.dp, VZinc2)) {
-                            Text(smartActionOptions.firstOrNull { it.first == selected }?.second ?: "Disabled", color = VWhite)
+                            Text(commandOptions.firstOrNull { it.first == selected }?.second ?: "Disabled", color = VWhite)
                         }
                         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                            smartActionOptions.forEach { (key, label) ->
-                                DropdownMenuItem(text = { Text(label) }, onClick = { actions.onTriggerActionChange(slot.id, key); expanded = false })
+                            commandOptions.forEach { (key, label) ->
+                                DropdownMenuItem(
+                                    text = { Text(label) },
+                                    onClick = { actions.onHeadsetTriggerActionChange(slot.first, key); expanded = false }
+                                )
                             }
                         }
                     }
                 }
                 HorizontalDivider(color = VZinc2)
             }
-            Text("Defaults: hold Volume Down = time; hold Volume Up = battery; double Volume Down = cycle EQ; double Volume Up = limiter.", color = VMuted, fontSize = 9.sp)
-        }
-        ProCard {
-            Text("AVAILABLE ACTIONS", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            listOf(
-                "Speak exact current time",
-                "Speak phone and headset battery when available",
-                "Cycle and announce saved EQ presets",
-                "Toggle the software max-volume limiter",
-                "Media next, previous or play / pause"
-            ).forEach { Text("•  " + it, color = VMuted, fontSize = 10.sp) }
+            Text("EQ scroll previews each preset for four seconds, then locks after five seconds without another volume tap.", color = VMuted, fontSize = 9.sp)
+            Text("Sleep timer command cycles 15 · 30 · 60 minutes · Off.", color = VMuted, fontSize = 9.sp)
         }
     }
 }
