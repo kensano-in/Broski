@@ -81,7 +81,15 @@ data class VerlynProUiState(
     val noiseStatus: String = "",
     val bassBoostEnabled: Boolean = false,
     val spatialEnabled: Boolean = false,
-    val clarity: Float = 0f
+    val clarity: Float = 0f,
+    val firmwareVersion: String = "",
+    val modelId: String = "",
+    val batterySource: String = "Unavailable",
+    val audioSessionBindings: List<String> = emptyList(),
+    val raceLog: List<String> = emptyList(),
+    val ttsStatus: String = "TTS initializing",
+    val testAudioStatus: String = "",
+    val smartKeyStatus: String = "Waiting for volume-key input"
 )
 
 data class VerlynProUiActions(
@@ -113,7 +121,9 @@ data class VerlynProUiActions(
     val onNoiseModeChange: (String) -> Unit = {},
     val onBassBoostChange: (Boolean) -> Unit = {},
     val onSpatialChange: (Boolean) -> Unit = {},
-    val onClarityChange: (Float) -> Unit = {}
+    val onClarityChange: (Float) -> Unit = {},
+    val onTestEq: () -> Unit = {},
+    val onPowerOffHeadset: () -> Unit = {}
 )
 
 private data class TriggerSlot(val id: String, val title: String, val defaultAction: String)

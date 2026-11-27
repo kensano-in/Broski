@@ -33,6 +33,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.KeyEvent
 import android.widget.Toast
@@ -144,6 +145,7 @@ class MainActivity : ComponentActivity() {
     private val smartTriggerActions = mutableStateMapOf<String, String>()
     private lateinit var rfcommEngine: ClassicRfcommEngine
     private lateinit var voiceAnnouncer: VoiceAnnouncer
+    private lateinit var eqTestPlayer: EqTestAudioPlayer
     private var rfcommState by mutableStateOf("Disconnected")
     private var headsetBatteryPercent by mutableStateOf<Int?>(null)
     private var headsetBatteryDetail by mutableStateOf("Connect Fast Pair RFCOMM to receive headset battery events")
@@ -159,6 +161,12 @@ class MainActivity : ComponentActivity() {
     private var snapshotDeviceAddress by mutableStateOf("Unavailable")
     private var classicJblDevice: BluetoothDevice? = null
     private var classicSdpStatus by mutableStateOf("Not scanned")
+    private var classicSdpScanInFlight = false
+    private var lastClassicSdpScanAt = 0L
+    private val classicSdpScanTimeout = Runnable {
+        classicSdpScanInFlight = false
+        if (classicSdpStatus.contains("pending", true)) classicSdpStatus = "SDP scan timed out; tap to retry"
+    }
 
     private var adapter: BluetoothAdapter? = null
     private var scanner: BluetoothLeScanner? = null
@@ -190,6 +198,14 @@ class MainActivity : ComponentActivity() {
     private var outputRoute by mutableStateOf("No active output route reported")
     private var audioEffectStatus by mutableStateOf("Initializing")
     private var serviceBatteryPercent by mutableStateOf<Int?>(null)
+    private var serviceBatterySource by mutableStateOf("Unavailable")
+    private var firmwareVersion by mutableStateOf("")
+    private var modelId by mutableStateOf("")
+    private var audioSessionBindings by mutableStateOf(emptyList<String>())
+    private val raceCaptureLog = mutableStateListOf<String>()
+    private var ttsStatus by mutableStateOf("TTS initializing")
+    private var testAudioStatus by mutableStateOf("")
+    private var smartKeyStatus by mutableStateOf("Waiting for volume-key input")
     private var serviceNoiseMode by mutableStateOf("Unknown")
     private var serviceNoiseReady by mutableStateOf(false)
     private var serviceNoiseModes by mutableStateOf(emptyList<String>())
@@ -205,7 +221,7 @@ class MainActivity : ComponentActivity() {
     private var writeHexInput by mutableStateOf("")
     private var eqEnabled by mutableStateOf(true)
     private var limiterEnabled by mutableStateOf(true)
-    private var sessionCompatibility by mutableStateOf(false)
+    private var sessionCompatibility by mutableStateOf(true)
     private var preamp by mutableFloatStateOf(0f)
     private var musicVolume by mutableIntStateOf(0)
     private var maxMusicVolume by mutableIntStateOf(15)
@@ -505,6 +521,10 @@ class MainActivity : ComponentActivity() {
                 VerlynConnectionService.ACTION_STATE -> {
                     val battery = intent.getIntExtra(VerlynConnectionService.EXTRA_BATTERY, -1)
                     serviceBatteryPercent = battery.takeIf { it in 0..100 }
+                    serviceBatterySource = intent.getStringExtra(VerlynConnectionService.EXTRA_BATTERY_SOURCE) ?: serviceBatterySource
+                    firmwareVersion = intent.getStringExtra(VerlynConnectionService.EXTRA_FIRMWARE)?.takeIf { it.isNotBlank() } ?: firmwareVersion
+                    modelId = intent.getStringExtra(VerlynConnectionService.EXTRA_MODEL_ID)?.takeIf { it.isNotBlank() } ?: modelId
+                    audioSessionBindings = intent.getStringArrayListExtra(VerlynConnectionService.EXTRA_AUDIO_SESSIONS)?.toList() ?: audioSessionBindings
                     rfcommState = intent.getStringExtra(VerlynConnectionService.EXTRA_LINK) ?: rfcommState
                     serviceNoiseMode = intent.getStringExtra(VerlynConnectionService.EXTRA_NOISE_MODE) ?: serviceNoiseMode
                     serviceNoiseReady = intent.getBooleanExtra(VerlynConnectionService.EXTRA_NOISE_READY, serviceNoiseReady)
@@ -520,6 +540,16 @@ class MainActivity : ComponentActivity() {
                     while (rfcommCaptureLog.size > 500) rfcommCaptureLog.removeAt(rfcommCaptureLog.lastIndex)
                     appendLog("RFCOMM RX " + line)
                 }
+                VerlynConnectionService.ACTION_RACE_LOG -> {
+                    val line = intent.getStringExtra(VerlynConnectionService.EXTRA_RACE_LOG) ?: return
+                    raceCaptureLog.add(line)
+                    while (raceCaptureLog.size > 400) raceCaptureLog.removeAt(0)
+                    appendLog(line)
+                }
+                VerlynSmartButtonService.ACTION_SMART_LOG -> {
+                    smartKeyStatus = intent.getStringExtra(VerlynSmartButtonService.EXTRA_SMART_LOG) ?: smartKeyStatus
+                    appendLog(smartKeyStatus)
+                }
                 VerlynAudioRuntime.ACTION_STATUS -> audioEffectStatus = intent.getStringExtra(VerlynAudioRuntime.EXTRA_STATUS) ?: audioEffectStatus
             }
         }
@@ -533,7 +563,12 @@ class MainActivity : ComponentActivity() {
             if (action == AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION) {
                 if (sessionCompatibility) {
                     compatibilitySessions.add(sessionId)
-                    audioEngine.attachSession(sessionId, eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
+                    audioEngine.attachSession(
+                        sessionId,
+                        intent.getStringExtra(AudioEffect.EXTRA_PACKAGE_NAME) ?: "Unknown media app",
+                        eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled,
+                        if (balanceEnabled) balance else 0f
+                    )
                     appendLog("Audio effect session opened: $sessionId")
                 }
             } else if (action == AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION) {
@@ -554,7 +589,18 @@ class MainActivity : ComponentActivity() {
         audioEngine = VerlynAudioRuntime.get(this)
         audioEngine.setBassBoost(bassBoostEnabled)
         audioEngine.setSpatial(spatialEnabled)
-        voiceAnnouncer = VoiceAnnouncer(this)
+        voiceAnnouncer = VoiceAnnouncer(this) { status ->
+            runOnUiThread {
+                ttsStatus = status
+                appendLog("TTS: " + status)
+            }
+        }
+        eqTestPlayer = EqTestAudioPlayer(audioEngine) { status ->
+            runOnUiThread {
+                testAudioStatus = status
+                appendLog("EQ test: " + status)
+            }
+        }
         rfcommEngine = ClassicRfcommEngine(
             onStatus = { value -> runOnUiThread { rfcommState = value; appendLog("RFCOMM: " + value) } },
             onPacket = { uuid, bytes ->
@@ -578,6 +624,14 @@ class MainActivity : ComponentActivity() {
                     }
                     known.firstOrNull()?.let { preferences.edit().putInt("headset_battery_percent", it).apply() }
                     appendLog("Fast Pair battery event: " + known.joinToString(", "))
+                }
+            },
+            onFastPairInfo = { info ->
+                runOnUiThread {
+                    info.firmwareVersion?.let { firmwareVersion = it }
+                    info.modelId?.let { modelId = it }
+                    if (info.firmwareVersion != null) appendLog("Fast Pair firmware: " + info.firmwareVersion)
+                    if (info.modelId != null) appendLog("Fast Pair Model ID: " + info.modelId)
                 }
             }
         )
@@ -637,7 +691,15 @@ class MainActivity : ComponentActivity() {
                     noiseStatus = serviceNoiseStatus,
                     bassBoostEnabled = bassBoostEnabled,
                     spatialEnabled = spatialEnabled,
-                    clarity = clarityValue
+                    clarity = clarityValue,
+                    firmwareVersion = firmwareVersion,
+                    modelId = modelId,
+                    batterySource = if (headsetBatteryPercent != null) "Fast Pair Message Stream" else serviceBatterySource,
+                    audioSessionBindings = audioSessionBindings,
+                    raceLog = raceCaptureLog.toList(),
+                    ttsStatus = ttsStatus,
+                    testAudioStatus = testAudioStatus,
+                    smartKeyStatus = smartKeyStatus
                 ),
                 actions = VerlynProUiActions(
                     onTabChange = { selectedTab = it },
@@ -686,6 +748,7 @@ class MainActivity : ComponentActivity() {
                     onTestVoice = {
                         val time = SimpleDateFormat("h:mm a", Locale.US).format(Date())
                         voiceAnnouncer.speak("It is " + time + ". Verlyn voice output test.")
+                        Toast.makeText(this@MainActivity, "TTS: " + ttsStatus, Toast.LENGTH_SHORT).show()
                     },
                     onNoiseModeChange = { VerlynConnectionService.requestNoiseMode(this@MainActivity, it) },
                     onBassBoostChange = {
@@ -707,7 +770,12 @@ class MainActivity : ComponentActivity() {
                         selectedPreset = "Custom"
                         mainHandler.removeCallbacks(audioApplyTask)
                         mainHandler.postDelayed(audioApplyTask, 32L)
-                    }
+                    },
+                    onTestEq = {
+                        saveAudioPreferences()
+                        eqTestPlayer.play(eqGains.toFloatArray(), preamp, eqEnabled, limiterEnabled, if (balanceEnabled) balance else 0f)
+                    },
+                    onPowerOffHeadset = { VerlynConnectionService.requestPowerOff(this@MainActivity) }
                 )
             )
         }
@@ -734,6 +802,8 @@ class MainActivity : ComponentActivity() {
         val filter = IntentFilter().apply {
             addAction(VerlynConnectionService.ACTION_STATE)
             addAction(VerlynConnectionService.ACTION_PACKET)
+            addAction(VerlynConnectionService.ACTION_RACE_LOG)
+            addAction(VerlynSmartButtonService.ACTION_SMART_LOG)
             addAction(VerlynAudioRuntime.ACTION_STATUS)
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(runtimeStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -908,7 +978,10 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("MissingPermission")
     private fun readNativeHeadsetBattery(device: BluetoothDevice) {
         val value = runCatching { device.javaClass.getMethod("getBatteryLevel").invoke(device) as? Int }.getOrNull()
-        if (value != null && value in 0..100) serviceBatteryPercent = value
+        if (value != null && value in 0..100) {
+            serviceBatteryPercent = value
+            serviceBatterySource = "Android Bluetooth device metadata"
+        }
     }
 
     private fun safeAddress(device: BluetoothDevice): String = try { device.address } catch (_: Throwable) { "Unavailable" }
@@ -1371,6 +1444,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleClassicUuidBroadcast(intent: Intent) {
+        classicSdpScanInFlight = false
+        mainHandler.removeCallbacks(classicSdpScanTimeout)
         val device = try {
             @Suppress("DEPRECATION")
             intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) as? BluetoothDevice
@@ -1400,6 +1475,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun scanClassicSdpUuids() {
+        val now = SystemClock.elapsedRealtime()
+        if (classicSdpScanInFlight) {
+            appendLog("Classic SDP scan ignored: request already in flight")
+            return
+        }
+        if (now - lastClassicSdpScanAt < 5_000L) {
+            classicSdpStatus = "Please wait before scanning again"
+            appendLog("Classic SDP scan ignored: 5-second cooldown")
+            return
+        }
         val device = classicJblDevice
         if (device == null) {
             classicSdpStatus = "Paired Classic JBL Tune 770NC device not found"
@@ -1410,8 +1495,12 @@ class MainActivity : ComponentActivity() {
             classicSdpStatus = "Bluetooth Connect permission required"
             return
         }
+        classicSdpScanInFlight = true
+        lastClassicSdpScanAt = now
+        mainHandler.removeCallbacks(classicSdpScanTimeout)
+        mainHandler.postDelayed(classicSdpScanTimeout, 5_000L)
         classicSdpStatus = "Requesting Classic SDP service discovery…"
-        appendLog("Starting Classic SDP UUID discovery for ${safeDeviceName(device)} (${safeAddress(device)})")
+        appendLog("Starting Classic SDP UUID discovery for " + safeDeviceName(device) + " (" + safeAddress(device) + ")")
         try {
             val cached = device.uuids?.map { it.uuid }.orEmpty()
             if (cached.isNotEmpty()) {
@@ -1421,9 +1510,15 @@ class MainActivity : ComponentActivity() {
             }
             val accepted = device.fetchUuidsWithSdp()
             appendLog(if (accepted) "fetchUuidsWithSdp() accepted; waiting for ACTION_UUID" else "fetchUuidsWithSdp() was not accepted")
-            if (!accepted && cached.isEmpty()) classicSdpStatus = "Android rejected the Classic SDP request"
+            if (!accepted) {
+                classicSdpScanInFlight = false
+                mainHandler.removeCallbacks(classicSdpScanTimeout)
+                if (cached.isEmpty()) classicSdpStatus = "Android rejected the Classic SDP request"
+            }
         } catch (error: Throwable) {
-            classicSdpStatus = "Classic SDP scan failed: ${error.message ?: "unknown error"}"
+            classicSdpScanInFlight = false
+            mainHandler.removeCallbacks(classicSdpScanTimeout)
+            classicSdpStatus = "Classic SDP scan failed: " + (error.message ?: "unknown error")
             appendLog(classicSdpStatus)
         }
     }
@@ -1436,53 +1531,75 @@ class MainActivity : ComponentActivity() {
 
     private fun copyGattDump() {
         val target = targetDevice
+        val displayedBattery = headsetBatteryPercent ?: serviceBatteryPercent ?: batteryLevel
+        val displayedSource = when {
+            headsetBatteryPercent != null -> headsetBatteryDetail
+            serviceBatteryPercent != null -> serviceBatterySource
+            batteryLevel != null -> "Standard BLE Battery Service"
+            else -> "Unavailable"
+        }
         val dump = buildString {
-            appendLine("VERLYN 0.2.0 — COMPLETE AUDIO / BLUETOOTH DUMP")
-            appendLine("Device: ${target?.let { safeDeviceName(it) } ?: "Not selected"}")
-            appendLine("Address: ${target?.let { safeAddress(it) } ?: "Unavailable"}")
-            appendLine("BLE state: $bleState")
-            appendLine("Snapshot status: ${if (gattSnapshotCached || bleState == "DISCONNECTED") "Last Discovered Snapshot (Cached)" else "Live"}")
-            appendLine("MTU: ${mtu ?: "Unavailable"}")
-            appendLine("Battery: " + (headsetBatteryPercent?.let { it.toString() + "%" } ?: batteryLevel?.let { it.toString() + "% (BLE)" } ?: "Unavailable"))
-            appendLine("Battery detail: " + headsetBatteryDetail)
+            appendLine("VERLYN 0.3.1 — COMPLETE AUDIO / BLUETOOTH DUMP")
+            appendLine("Device: " + (target?.let { safeDeviceName(it) } ?: "Not selected"))
+            appendLine("Address: " + (target?.let { safeAddress(it) } ?: "Unavailable"))
+            appendLine("BLE state: " + bleState)
+            appendLine("Snapshot status: " + if (gattSnapshotCached || bleState == "DISCONNECTED") "Last Discovered Snapshot (Cached)" else "Live")
+            appendLine("MTU: " + (mtu ?: "Unavailable"))
+            appendLine("Battery: " + (displayedBattery?.let { it.toString() + "%" } ?: "Unavailable"))
+            appendLine("Battery source: " + displayedSource)
+            appendLine("Firmware: " + if (firmwareVersion.isNotBlank()) "FW " + firmwareVersion else "Unavailable")
+            appendLine("Model ID: " + modelId.ifBlank { "Unavailable" })
+            appendLine("TTS engine: " + ttsStatus)
+            appendLine("Smart key engine: " + smartKeyStatus)
+            appendLine("AudioEffect engine: " + audioEngine.statusForEffects())
+            appendLine("Session compatibility: " + sessionCompatibility)
+            appendLine("Audio session state:")
+            audioEngine.sessionDebugLines().forEach { appendLine("  " + it) }
+            appendLine("Service audio bindings:")
+            audioSessionBindings.forEach { appendLine("  " + it) }
+            appendLine("Test audio: " + testAudioStatus)
             appendLine("Classic RFCOMM status: " + rfcommState)
             appendLine()
-            appendLine("CLASSIC RFCOMM PASSIVE STREAM CAPTURE")
+            appendLine("CLASSIC RFCOMM CAPTURE")
             if (rfcommCaptureLog.isEmpty()) appendLine("No RFCOMM data captured") else rfcommCaptureLog.asReversed().forEach { appendLine(it) }
-            appendLine("RSSI: ${rssi?.let { "$it dBm" } ?: "Unavailable"}")
+            appendLine("RSSI: " + (rssi?.let { it.toString() + " dBm" } ?: "Unavailable"))
             appendLine()
             appendLine(if (gattSnapshotCached || bleState == "DISCONNECTED") "Last Discovered Snapshot (Cached)" else "Current GATT Snapshot")
-            appendLine("Snapshot Device: $snapshotDeviceName")
-            appendLine("Snapshot Address: $snapshotDeviceAddress")
-            appendLine("BLE GATT Services: ${gattServices.size}")
+            appendLine("Snapshot Device: " + snapshotDeviceName)
+            appendLine("Snapshot Address: " + snapshotDeviceAddress)
+            appendLine("BLE GATT Services: " + gattServices.size)
             gattServices.forEach { service ->
-                appendLine("SERVICE ${service.uuid}")
+                appendLine("SERVICE " + service.uuid)
                 service.characteristics.forEach { item ->
-                    appendLine("  CHARACTERISTIC ${item.uuid}")
-                    appendLine("    PROPERTIES ${propertyNames(item.properties).joinToString(", ")}")
-                    appendLine("    VALUE_HEX ${item.valueHex}")
-                    appendLine("    VALUE_UTF8 ${item.valueText}")
-                    item.descriptorUuids.forEach { descriptorUuid -> appendLine("    DESCRIPTOR $descriptorUuid") }
+                    appendLine("  CHARACTERISTIC " + item.uuid)
+                    appendLine("    PROPERTIES " + propertyNames(item.properties).joinToString(", "))
+                    appendLine("    VALUE_HEX " + item.valueHex)
+                    appendLine("    VALUE_UTF8 " + item.valueText)
+                    item.descriptorUuids.forEach { descriptorUuid -> appendLine("    DESCRIPTOR " + descriptorUuid) }
                 }
             }
             appendLine()
             appendLine("CLASSIC BLUETOOTH SDP UUIDS")
-            appendLine("Classic device: ${classicJblDevice?.let { safeDeviceName(it) } ?: "Not found among paired devices"}")
-            appendLine("SDP status: $classicSdpStatus")
+            appendLine("Classic device: " + (classicJblDevice?.let { safeDeviceName(it) } ?: "Not found"))
+            appendLine("SDP status: " + classicSdpStatus)
             if (classicSdpUuids.isEmpty()) appendLine("No Classic SDP UUIDs captured")
-            else classicSdpUuids.forEach { appendLine("CLASSIC SERVICE UUID $it") }
+            else classicSdpUuids.forEach { appendLine("CLASSIC SERVICE UUID " + it) }
             appendLine()
-            appendLine("AIROHA RACE RX PASSIVE CAPTURE LOG")
-            appendLine("Listener active: $airohaListening")
-            if (airohaCaptureLog.isEmpty()) appendLine("No Airoha RX packets captured")
+            appendLine("AIROHA RACE TX / RX LOG")
+            if (raceCaptureLog.isEmpty()) appendLine("No Classic RACE TX/RX bytes captured")
+            else raceCaptureLog.forEach { appendLine(it) }
+            appendLine()
+            appendLine("AIROHA BLE PASSIVE RX LOG")
+            appendLine("Listener active: " + airohaListening)
+            if (airohaCaptureLog.isEmpty()) appendLine("No Airoha BLE RX notifications captured")
             else airohaCaptureLog.asReversed().forEach { appendLine(it) }
             appendLine()
             appendLine("PACKET / OPERATION LOG")
             packetLog.asReversed().forEach { appendLine(it) }
         }
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Verlyn GATT dump", dump))
-        Toast.makeText(this, "Full GATT dump copied", Toast.LENGTH_SHORT).show()
+        clipboard.setPrimaryClip(ClipData.newPlainText("Verlyn diagnostic dump", dump))
+        Toast.makeText(this, "VERLYN 0.3.1 diagnostic dump copied", Toast.LENGTH_SHORT).show()
     }
 
     private fun updateSessionCompatibility(enabled: Boolean) {
@@ -1629,6 +1746,7 @@ class MainActivity : ComponentActivity() {
         try { unregisterReceiver(runtimeStateReceiver) } catch (_: Throwable) {}
         mainHandler.removeCallbacks(audioApplyTask)
         try { rfcommEngine.shutdown() } catch (_: Throwable) {}
+        try { eqTestPlayer.shutdown() } catch (_: Throwable) {}
         try { voiceAnnouncer.shutdown() } catch (_: Throwable) {}
         try { a2dpProxy?.let { (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter?.closeProfileProxy(BluetoothProfile.A2DP, it) } } catch (_: Throwable) {}
         try { headsetProxy?.let { (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter?.closeProfileProxy(BluetoothProfile.HEADSET, it) } } catch (_: Throwable) {}

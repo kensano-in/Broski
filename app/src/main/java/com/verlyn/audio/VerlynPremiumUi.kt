@@ -133,6 +133,9 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
                 Column(Modifier.weight(1f)) {
                     Text("JBL TUNE 770NC", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                     Text(if (s.audioConnected) "Connected" else "Not connected", color = if (s.audioConnected) VGreen else VMuted, fontSize = 11.sp)
+                    if (s.firmwareVersion.isNotBlank()) {
+                        Text("FW " + s.firmwareVersion, color = VBlueLight, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                    }
                     Surface(color = VBlue.copy(alpha = .12f), shape = RoundedCornerShape(7.dp)) {
                         Text(if (s.audioConnected) "A2DP · CONNECTED" else routeText(s.route).uppercase(), color = VBlueLight, fontSize = 8.sp, modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp), maxLines = 1)
                     }
@@ -162,14 +165,14 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("NOISE CONTROL", fontWeight = FontWeight.Bold)
-                    Text(if (s.noiseControlReady) "Headset: " + s.noiseMode else "Ready when headset responds", color = VMuted, fontSize = 10.sp)
+                    Text(if (s.noiseControlReady) "Headset: " + s.noiseMode else "Tap a mode to read or change it", color = VMuted, fontSize = 10.sp)
                 }
                 TinyTag(if (s.noiseControlReady) "READY" else "STANDBY", s.noiseControlReady)
             }
             listOf("ANC", "Ambient Aware", "TalkThru", "Off").chunked(2).forEach { modes ->
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     modes.forEach { mode ->
-                        val enabled = s.noiseControlReady && mode in s.noiseSupportedModes
+                        val enabled = s.audioConnected
                         val selected = s.noiseMode.equals(mode, true)
                         Surface(Modifier.weight(1f).clickable(enabled = enabled) { a.onNoiseModeChange(mode) },
                             color = if (selected) VBlue.copy(alpha = .2f) else Color(0xFF171B23),
@@ -250,6 +253,19 @@ private fun EqualizerTab(s: VerlynProUiState, a: VerlynProUiActions) {
             Setting("Channel balance", "Enable stereo balance") { Switch(s.balanceEnabled, a.onBalanceEnabledChange) }
             Setting("Peak limiter", "Output headroom control") { Switch(s.limiterEnabled, a.onLimiterChange) }
             Text(s.effectStatus, color = VMuted, fontSize = 9.sp)
+            if (s.audioSessionBindings.isEmpty()) {
+                Text("Waiting for playback start — restart or pause/play music to attach", color = VMuted, fontSize = 9.sp)
+            } else {
+                s.audioSessionBindings.forEach { binding ->
+                    Text("Bound to " + binding, color = VBlueLight, fontSize = 9.sp)
+                }
+            }
+            OutlinedButton(onClick = a.onTestEq, modifier = Modifier.fillMaxWidth()) {
+                Text("PLAY TEST AUDIO")
+            }
+            if (s.testAudioStatus.isNotBlank()) {
+                Text(s.testAudioStatus, color = VMuted, fontSize = 9.sp)
+            }
         }
     }
     if (showSave) {
@@ -333,6 +349,8 @@ private fun SmartTab(s: VerlynProUiState, a: VerlynProUiActions, pick: (String) 
         }
         PremiumCard {
             Text("GESTURE ASSIGNMENTS", fontWeight = FontWeight.Bold)
+            Text("Works with phone volume keys while screen is on or locked.", color = VMuted, fontSize = 9.sp)
+            Text(s.smartKeyStatus, color = VBlueLight, fontSize = 9.sp)
             slots.forEach { slot ->
                 Row(Modifier.fillMaxWidth().clickable { pick(slot.first) }.padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -349,6 +367,7 @@ private fun SmartTab(s: VerlynProUiState, a: VerlynProUiActions, pick: (String) 
 
 @Composable
 private fun InspectorTab(s: VerlynProUiState, a: VerlynProUiActions) {
+    var confirmPowerOff by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PremiumCard {
             Text("CONNECTION INSPECTOR", fontWeight = FontWeight.Bold)
@@ -356,11 +375,20 @@ private fun InspectorTab(s: VerlynProUiState, a: VerlynProUiActions) {
             InspectorLine("Classic RFCOMM", s.rfcommState)
             InspectorLine("BLE GATT", s.bleState)
             InspectorLine("Battery", s.batteryPercent?.let { "$it%" } ?: "Unavailable")
+            InspectorLine("Battery source", s.batterySource)
+            InspectorLine("Firmware", if (s.firmwareVersion.isBlank()) "Not received" else "FW " + s.firmwareVersion)
+            InspectorLine("Model ID", s.modelId.ifBlank { "Not received" })
             InspectorLine("Noise control", s.noiseStatus.ifBlank { s.noiseMode })
             InspectorLine("Audio effect", s.effectStatus)
+            InspectorLine("TTS engine", s.ttsStatus)
+            s.audioSessionBindings.forEach { InspectorLine("Bound session", it) }
+            InspectorLine("Smart keys", s.smartKeyStatus)
             TextButton(onClick = a.onScan) { Text("Refresh devices") }
             TextButton(onClick = a.onScanClassicSdp) { Text("Scan Classic SDP") }
             TextButton(onClick = a.onCopyDump) { Text("Copy diagnostic dump") }
+            OutlinedButton(onClick = { confirmPowerOff = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Power off headset")
+            }
         }
         if (s.classicSdpUuids.isNotEmpty()) PremiumCard {
             Text("CLASSIC SERVICE UUIDS", color = VBlueLight, fontWeight = FontWeight.Bold, fontSize = 10.sp)
@@ -372,10 +400,29 @@ private fun InspectorTab(s: VerlynProUiState, a: VerlynProUiActions) {
             else s.rfcommCaptureLog.take(30).forEach { Text(it, color = VMuted, fontSize = 8.sp, lineHeight = 12.sp) }
         }
         PremiumCard {
+            Text("AIROHA RACE TX / RX", color = VBlueLight, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+            if (s.raceLog.isEmpty()) Text("No RACE frames captured", color = VMuted, fontSize = 10.sp)
+            else s.raceLog.takeLast(80).asReversed().forEach {
+                Text(it, color = VMuted, fontSize = 8.sp, lineHeight = 12.sp)
+            }
+        }
+        PremiumCard {
             Text("RECENT EVENTS", color = VBlueLight, fontWeight = FontWeight.Bold, fontSize = 10.sp)
             if (s.packetLog.isEmpty()) Text("No recent events", color = VMuted, fontSize = 10.sp)
             else s.packetLog.take(35).forEach { Text(it, color = VMuted, fontSize = 8.sp, lineHeight = 12.sp) }
         }
+    }
+    if (confirmPowerOff) {
+        AlertDialog(
+            onDismissRequest = { confirmPowerOff = false },
+            title = { Text("Power off JBL Tune 770NC?") },
+            text = { Text("The headset will disconnect and may need to be powered on manually.") },
+            confirmButton = {
+                TextButton(onClick = { confirmPowerOff = false; a.onPowerOffHeadset() }) { Text("POWER OFF") }
+            },
+            dismissButton = { TextButton(onClick = { confirmPowerOff = false }) { Text("CANCEL") } },
+            containerColor = VCard
+        )
     }
 }
 

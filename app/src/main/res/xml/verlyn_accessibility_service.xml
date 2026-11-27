@@ -3,6 +3,7 @@
     android:description="@string/verlyn_accessibility_description"
     android:accessibilityEventTypes="typeAllMask"
     android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRequestFilterKeyEvents"
     android:notificationTimeout="50"
     android:canRetrieveWindowContent="false"
     android:canRequestFilterKeyEvents="true" />

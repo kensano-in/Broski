@@ -3,201 +3,273 @@ package com.verlyn.audio
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
+import android.os.SystemClock
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 data class AirohaRaceState(
     val ready: Boolean,
     val mode: String,
-    val chipName: String,
-    val supportedModes: List<String>,
-    val detail: String
+    val detail: String,
+    val endpoint: String = "",
+    val modeCode: Int? = null
 )
 
-/** A deliberately restricted JBL Tune 770NC RACE client: identity/status reads and ANC modes only. */
-class AirohaRaceClient {
-    private val io = Executors.newSingleThreadExecutor()
-    @Volatile private var active: BluetoothSocket? = null
+class AirohaRaceClient(private val onLog: (String) -> Unit) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val commandMutex = Mutex()
+    @Volatile private var activeSocket: BluetoothSocket? = null
 
     fun probe(device: BluetoothDevice, callback: (AirohaRaceState) -> Unit) {
-        io.execute {
-            val result = runCatching {
-                withSocket(device) { input, output ->
-                    val chip = readChip(input, output)
-                    val layout = layoutOf(chip)
-                    val filter = readFilter(input, output)
-                    val modes = supported(layout)
-                    AirohaRaceState(layout != Layout.UNKNOWN && filter != null, modeOf(filter, layout) ?: "Unknown", chip, modes,
-                        if (filter == null) "No valid noise-control status reply" else "Headset status read")
+        scope.launch {
+            val state = runCatching {
+                commandMutex.withLock {
+                    val connected = openVerifiedSocket(device)
+                    try {
+                        AirohaRaceState(true, modeName(connected.modeCode), "RACE status received · " + connected.endpoint,
+                            connected.endpoint, connected.modeCode)
+                    } finally {
+                        closeSocket(connected.socket)
+                    }
                 }
-            }.getOrElse { AirohaRaceState(false, "Unavailable", "Unknown", emptyList(), it.message ?: "RACE probe failed") }
-            callback(result)
+            }.getOrElse {
+                AirohaRaceState(false, "Unknown", "RACE status unavailable · " + (it.message ?: "no response"))
+            }
+            callback(state)
         }
     }
 
-    fun setNoiseMode(device: BluetoothDevice, mode: String, callback: (AirohaRaceState) -> Unit) {
-        io.execute {
-            val result = runCatching {
-                withSocket(device) { input, output ->
-                    val chip = readChip(input, output)
-                    val layout = layoutOf(chip)
-                    val filter = when (mode) {
-                        "ANC" -> 1
-                        "Ambient Aware" -> if (layout == Layout.AB156X) 10 else null
-                        "TalkThru" -> if (layout == Layout.AB156X) 9 else null
-                        "Off" -> 0
-                        else -> null
-                    } ?: throw IllegalArgumentException("Mode not supported by this chipset")
-                    val payload = when (mode) {
-                        "Off" -> byteArrayOf(0x00, 0x0B)
-                        "ANC" -> when (layout) {
-                            Layout.AB156X -> byteArrayOf(0x00, 0x0A, 0x01, 0x00)
-                            Layout.AB155X -> byteArrayOf(0x00, 0x0A, 0x01)
-                            else -> error("Unknown chipset layout")
-                        }
-                        "Ambient Aware" -> byteArrayOf(0x00, 0x0A, 0x0A, 0x04)
-                        "TalkThru" -> byteArrayOf(0x00, 0x0A, 0x09, 0x04)
-                        else -> error("Unsupported noise mode")
-                    }
-                    val ack = request(input, output, 0x0E06, payload)
-                    require(ack.size >= 2 && ack[0].toInt() == 0 && (ack[1].toInt() and 0xFF) == (payload[1].toInt() and 0xFF)) {
-                        "Headset rejected the command"
-                    }
-                    val actual = readFilter(input, output)
-                    require(actual == filter) { "Headset did not confirm the requested mode" }
-                    AirohaRaceState(true, modeOf(actual, layout) ?: mode, chip, supported(layout), "Confirmed by headset status reply")
-                }
-            }.getOrElse { AirohaRaceState(false, "Unavailable", "Unknown", emptyList(), it.message ?: "Noise-control operation failed") }
-            callback(result)
+    fun setNoiseMode(device: BluetoothDevice, requestedMode: String, callback: (AirohaRaceState) -> Unit) {
+        val command = modeCommands[requestedMode]
+        if (command == null) {
+            callback(AirohaRaceState(false, "Unknown", "Unsupported noise-control action"))
+            return
         }
+        scope.launch {
+            val state = runCatching {
+                commandMutex.withLock {
+                    val connected = openVerifiedSocket(device)
+                    try {
+                        writeRequest(connected.output, SET_NOISE_OPCODE, command.payload)
+                        val confirmation = awaitResponse(connected.input, GET_NOISE_OPCODE, RESPONSE_TIMEOUT_MS)
+                        val code = parseModeCode(confirmation.body)
+                            ?: throw IllegalStateException("Malformed 0x0901 mode response")
+                        if (code != command.expectedCode) {
+                            throw IllegalStateException("Headset reported " + modeName(code) + " instead of " + requestedMode)
+                        }
+                        AirohaRaceState(true, modeName(code), requestedMode + " confirmed by headset · " + connected.endpoint,
+                            connected.endpoint, code)
+                    } finally {
+                        closeSocket(connected.socket)
+                    }
+                }
+            }.getOrElse {
+                AirohaRaceState(false, "Unknown", requestedMode + " failed · " + (it.message ?: "no response"))
+            }
+            callback(state)
+        }
+    }
+
+    fun powerOff(device: BluetoothDevice, callback: (String) -> Unit) {
+        scope.launch {
+            val message = runCatching {
+                commandMutex.withLock {
+                    val connected = openVerifiedSocket(device)
+                    try {
+                        writeRequest(connected.output, POWER_OFF_OPCODE, byteArrayOf(0x18, 0x00))
+                        "Power-off command sent · " + connected.endpoint
+                    } finally {
+                        closeSocket(connected.socket)
+                    }
+                }
+            }.getOrElse { "Power-off failed · " + (it.message ?: "no response") }
+            callback(message)
+        }
+    }
+
+    private data class ConnectedRaceSocket(
+        val socket: BluetoothSocket,
+        val input: InputStream,
+        val output: OutputStream,
+        val endpoint: String,
+        val modeCode: Int
+    )
+    private data class SocketCandidate(val label: String, val create: () -> BluetoothSocket)
+    private data class RaceFrame(val type: Int, val opcode: Int, val body: ByteArray)
+    private data class ModeCommand(val payload: ByteArray, val expectedCode: Int)
+
+    @SuppressLint("MissingPermission")
+    private suspend fun openVerifiedSocket(device: BluetoothDevice): ConnectedRaceSocket {
+        var lastError: Throwable? = null
+        for (candidate in socketCandidates(device)) {
+            var socket: BluetoothSocket? = null
+            try {
+                onLog("RACE CONNECT attempt · " + candidate.label)
+                socket = candidate.create()
+                socket.connect()
+                activeSocket = socket
+                onLog("RACE CONNECT success · " + candidate.label)
+                val input = socket.inputStream
+                val output = socket.outputStream
+                writeRequest(output, GET_NOISE_OPCODE, byteArrayOf(0x05, 0x00))
+                val frame = awaitResponse(input, GET_NOISE_OPCODE, RESPONSE_TIMEOUT_MS)
+                val code = parseModeCode(frame.body)
+                    ?: throw IllegalStateException("Invalid 0x0901 response body " + frame.body.hex())
+                onLog("RACE STATE · mode=" + modeName(code) + " code=0x" + code.toString(16).uppercase() + " endpoint=" + candidate.label)
+                return ConnectedRaceSocket(socket, input, output, candidate.label, code)
+            } catch (error: Throwable) {
+                lastError = error
+                onLog("RACE CONNECT/GET failed · " + candidate.label + " · " + error.javaClass.simpleName + ": " + (error.message ?: "no response"))
+                closeSocket(socket)
+            }
+        }
+        throw IllegalStateException("No RACE endpoint returned a valid 0x0901 status", lastError)
     }
 
     @SuppressLint("MissingPermission")
-    private fun <T> withSocket(device: BluetoothDevice, action: (InputStream, OutputStream) -> T): T {
-        var socket: BluetoothSocket? = null
-        try {
-            val secure = device.createRfcommSocketToServiceRecord(RACE_UUID)
-            try {
-                secure.connect()
-                socket = secure
-            } catch (e: Throwable) {
-                runCatching { secure.close() }
-                val insecure = device.createInsecureRfcommSocketToServiceRecord(RACE_UUID)
-                insecure.connect()
-                socket = insecure
-            }
-            val connected = socket ?: error("RFCOMM socket was not created")
-            active = connected
-            return action(connected.inputStream, connected.outputStream)
-        } finally {
-            active = null
-            runCatching { socket?.close() }
+    private fun socketCandidates(device: BluetoothDevice): List<SocketCandidate> = listOf(
+        SocketCandidate("RACE UUID " + RACE_UUID + " · secure") { device.createRfcommSocketToServiceRecord(RACE_UUID) },
+        SocketCandidate("RACE UUID " + RACE_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(RACE_UUID) },
+        SocketCandidate("PRIM UUID " + PRIM_UUID + " · secure") { device.createRfcommSocketToServiceRecord(PRIM_UUID) },
+        SocketCandidate("PRIM UUID " + PRIM_UUID + " · insecure") { device.createInsecureRfcommSocketToServiceRecord(PRIM_UUID) },
+        SocketCandidate("RFCOMM channel 21 · secure reflection") { createChannelSocket(device, false) },
+        SocketCandidate("RFCOMM channel 21 · insecure reflection") { createChannelSocket(device, true) }
+    )
+
+    @SuppressLint("MissingPermission")
+    private fun createChannelSocket(device: BluetoothDevice, insecure: Boolean): BluetoothSocket {
+        val methodName = if (insecure) "createInsecureRfcommSocket" else "createRfcommSocket"
+        val method = device.javaClass.getMethod(methodName, Int::class.javaPrimitiveType!!)
+        return method.invoke(device, RFCOMM_CHANNEL) as BluetoothSocket
+    }
+
+    private suspend fun writeRequest(output: OutputStream, opcode: Int, payload: ByteArray) {
+        val frame = buildRequest(opcode, payload)
+        onLog("RACE TX op=0x" + opcode.toString(16).uppercase().padStart(4, '0') + " · " + frame.hex())
+        output.write(frame)
+        output.flush()
+    }
+
+    private fun buildRequest(opcode: Int, payload: ByteArray): ByteArray {
+        val length = payload.size + 2
+        return ByteArray(6 + payload.size).also { frame ->
+            frame[0] = 0x05
+            frame[1] = 0x5A
+            frame[2] = (length and 0xFF).toByte()
+            frame[3] = ((length shr 8) and 0xFF).toByte()
+            frame[4] = (opcode and 0xFF).toByte()
+            frame[5] = ((opcode shr 8) and 0xFF).toByte()
+            payload.copyInto(frame, 6)
         }
     }
 
-    private fun readChip(input: InputStream, output: OutputStream): String {
-        val body = request(input, output, 0x0A00, byteArrayOf(0x02, 0x10, 0xE8.toByte(), 0x03))
-        require(body.size >= 3) { "Short chipset identity reply" }
-        val n = u16(body, 0)
-        require(n in 1..256 && body.size >= n + 2) { "Invalid chipset identity length" }
-        return body.copyOfRange(2, n + 2).toString(Charsets.US_ASCII).trimEnd('\u0000')
-    }
-
-    private fun readFilter(input: InputStream, output: OutputStream): Int? {
-        val body = request(input, output, 0x0901, byteArrayOf(0x05, 0x00))
-        if (body.size < 4 || u16(body, 0) != 5 || body[2].toInt() != 0) return null
-        return body[3].toInt() and 0xFF
-    }
-
-    private fun request(input: InputStream, output: OutputStream, opcode: Int, payload: ByteArray): ByteArray {
-        val n = payload.size + 2
-        val frame = ByteArray(6 + payload.size)
-        frame[0] = 0x05
-        frame[1] = 0x5A
-        frame[2] = n.toByte()
-        frame[3] = (n shr 8).toByte()
-        frame[4] = opcode.toByte()
-        frame[5] = (opcode shr 8).toByte()
-        payload.copyInto(frame, 6)
-        output.write(frame)
-        output.flush()
-        return readReply(input, opcode, 3_500L)
-    }
-
-    private fun readReply(input: InputStream, expectedOpcode: Int, timeoutMs: Long): ByteArray {
+    private suspend fun awaitResponse(input: InputStream, expectedOpcode: Int, timeoutMs: Long): RaceFrame {
         val pending = ByteArrayOutputStream()
-        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
-        val buffer = ByteArray(1024)
-        while (System.nanoTime() < deadline) {
+        val buffer = ByteArray(512)
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
             val available = input.available()
-            if (available == 0) {
-                Thread.sleep(15)
+            if (available <= 0) {
+                delay(12L)
                 continue
             }
             val count = input.read(buffer, 0, minOf(available, buffer.size))
-            if (count <= 0) continue
-            pending.write(buffer, 0, count)
+            if (count < 0) throw IllegalStateException("RACE stream closed while waiting for 0x" + expectedOpcode.toString(16))
+            if (count == 0) continue
+            val chunk = buffer.copyOf(count)
+            onLog("RACE RX · " + chunk.hex())
+            pending.write(chunk)
             val bytes = pending.toByteArray()
             var cursor = 0
-            while (bytes.size - cursor >= 6) {
-                if ((bytes[cursor].toInt() and 0xFF) != 0x05) { cursor++; continue }
-                val length = u16(bytes, cursor + 2)
-                if (length !in 2..2048) { cursor++; continue }
-                val end = cursor + 6 + length
-                if (end > bytes.size) break
+            var matched: RaceFrame? = null
+            while (bytes.size - cursor >= FRAME_HEADER_SIZE) {
+                if ((bytes[cursor].toInt() and 0xFF) != FRAME_MAGIC) {
+                    cursor++
+                    continue
+                }
+                val length = u16le(bytes, cursor + 2)
+                if (length !in 2..MAX_FRAME_BODY) {
+                    cursor++
+                    continue
+                }
+                // RACE length counts opcode + payload; total frame size is 4 + length.
+                val frameEnd = cursor + 4 + length
+                if (frameEnd > bytes.size) break
                 val type = bytes[cursor + 1].toInt() and 0xFF
-                val opcode = u16(bytes, cursor + 4)
-                val body = bytes.copyOfRange(cursor + 6, end)
-                cursor = end
-                if ((type == 0x5B || type == 0x5D) && opcode == expectedOpcode) return body
+                val opcode = u16le(bytes, cursor + 4)
+                val body = bytes.copyOfRange(cursor + 6, frameEnd)
+                cursor = frameEnd
+                onLog("RACE FRAME type=0x" + type.toString(16).uppercase() +
+                    " op=0x" + opcode.toString(16).uppercase().padStart(4, '0') + " body=" + body.hex())
+                if ((type == RESPONSE_TYPE || type == INDICATION_TYPE) && opcode == expectedOpcode) {
+                    matched = RaceFrame(type, opcode, body)
+                    break
+                }
             }
             pending.reset()
+            if (matched != null) return matched
             if (cursor < bytes.size) pending.write(bytes, cursor, bytes.size - cursor)
-            if (pending.size() > 4096) pending.reset()
+            if (pending.size() > MAX_PENDING_BYTES) pending.reset()
         }
         throw IllegalStateException("RACE response timeout for 0x" + expectedOpcode.toString(16))
     }
 
-    private enum class Layout { UNKNOWN, AB155X, AB156X }
-
-    private fun layoutOf(chip: String): Layout {
-        val s = chip.trim().uppercase()
-        return when {
-            s.isBlank() || s.contains("AB1562") -> Layout.UNKNOWN
-            s.startsWith("AB155") -> Layout.AB155X
-            s.startsWith("AB158") || s.startsWith("AB157") || s.startsWith("MT") ||
-                s.contains("AB1565") || s.contains("AB1568") -> Layout.AB156X
-            else -> Layout.UNKNOWN
-        }
+    private fun parseModeCode(body: ByteArray): Int? {
+        if (body.size < 4) return null
+        return body[3].toInt() and 0xFF
     }
 
-    private fun supported(layout: Layout): List<String> = when (layout) {
-        Layout.AB156X -> listOf("ANC", "Ambient Aware", "TalkThru", "Off")
-        Layout.AB155X -> listOf("ANC", "Off")
-        Layout.UNKNOWN -> emptyList()
+    private fun modeName(code: Int): String = when (code) {
+        0x00 -> "Off"
+        0x01 -> "ANC"
+        0x09 -> "TalkThru"
+        0x0A -> "Ambient Aware"
+        else -> "Unknown (0x" + code.toString(16).uppercase() + ")"
     }
 
-    private fun modeOf(filter: Int?, layout: Layout): String? = when (filter) {
-        0 -> "Off"
-        1, 2, 3, 4 -> "ANC"
-        9 -> if (layout == Layout.AB156X) "TalkThru" else null
-        10 -> if (layout == Layout.AB156X) "Ambient Aware" else null
-        else -> null
+    private fun closeSocket(socket: BluetoothSocket?) {
+        if (activeSocket === socket) activeSocket = null
+        runCatching { socket?.close() }
     }
-
-    private fun u16(bytes: ByteArray, i: Int): Int =
-        (bytes[i].toInt() and 0xFF) or ((bytes[i + 1].toInt() and 0xFF) shl 8)
 
     fun shutdown() {
-        runCatching { active?.close() }
-        io.shutdownNow()
+        runCatching { activeSocket?.close() }
+        scope.cancel()
     }
 
+    private fun ByteArray.hex(): String = joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+    private fun u16le(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+
     companion object {
+        private const val FRAME_MAGIC = 0x05
+        private const val RESPONSE_TYPE = 0x5B
+        private const val INDICATION_TYPE = 0x5D
+        private const val FRAME_HEADER_SIZE = 6
+        private const val MAX_FRAME_BODY = 2048
+        private const val MAX_PENDING_BYTES = 4096
+        private const val RFCOMM_CHANNEL = 21
+        private const val RESPONSE_TIMEOUT_MS = 3_000L
+        private const val GET_NOISE_OPCODE = 0x0901
+        private const val SET_NOISE_OPCODE = 0x0E06
+        private const val POWER_OFF_OPCODE = 0x1101
         private val RACE_UUID = UUID.fromString("00000000-0000-0000-0099-aabbccddeeff")
+        private val PRIM_UUID = UUID.fromString("5052494d-2dab-0341-6972-6f6861424c45")
+        private val modeCommands = mapOf(
+            "ANC" to ModeCommand(byteArrayOf(0x00, 0x0A, 0x01), 0x01),
+            "Ambient Aware" to ModeCommand(byteArrayOf(0x00, 0x0A, 0x0A), 0x0A),
+            "TalkThru" to ModeCommand(byteArrayOf(0x00, 0x0A, 0x09), 0x09),
+            "Off" to ModeCommand(byteArrayOf(0x00, 0x0B), 0x00)
+        )
     }
 }
