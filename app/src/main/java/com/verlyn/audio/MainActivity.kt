@@ -73,16 +73,14 @@ private val Blue = Color(0xFF4C8DFF)
 private val Muted = Color(0xFF9AA4B2)
 private val Green = Color(0xFF69D69A)
 private val BatteryServiceUuid = UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
-private val DeviceInformationServiceUuid = UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb")
-private val DeviceInformationCharacteristicUuids = listOf(
-    UUID.fromString("00002a24-0000-1000-8000-00805f9b34fb"),
-    UUID.fromString("00002a26-0000-1000-8000-00805f9b34fb"),
-    UUID.fromString("00002a27-0000-1000-8000-00805f9b34fb"),
-    UUID.fromString("00002a28-0000-1000-8000-00805f9b34fb"),
-    UUID.fromString("00002a29-0000-1000-8000-00805f9b34fb")
-)
 private val BatteryLevelUuid = UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb")
 private val CccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+private val AirohaRaceServiceUuid = UUID.fromString("5052494d-2dab-0341-6972-6f6861424c45")
+private val AirohaTxCharacteristicUuid = UUID.fromString("43484152-2dab-3241-6972-6f6861424c45")
+private val AirohaRxCharacteristicUuid = UUID.fromString("43484152-2dab-3141-6972-6f6861424c45")
+private val AmazonAmaServiceUuid = UUID.fromString("0000fe03-0000-1000-8000-00805f9b34fb")
+private val GoogleFastPairServiceUuid = UUID.fromString("0000fe2c-0000-1000-8000-00805f9b34fb")
+private val DultServiceUuid = UUID.fromString("15190001-12f4-c226-88ed-2ac5579f2a85")
 
 private data class DeviceRow(
     val device: BluetoothDevice,
@@ -129,9 +127,12 @@ class MainActivity : ComponentActivity() {
     private val deviceRows = mutableStateListOf<DeviceRow>()
     private val gattServices = mutableStateListOf<GattServiceRow>()
     private val packetLog = mutableStateListOf<String>()
+    private val airohaCaptureLog = mutableStateListOf<String>()
     private val classicSdpUuids = mutableStateListOf<UUID>()
     private val gattOperationQueue = ArrayDeque<GattOperation>()
     private var activeGattOperation: GattOperation? = null
+    private var pendingGattDevice: BluetoothDevice? = null
+    private var airohaListening by mutableStateOf(false)
     private var gattSnapshotCached by mutableStateOf(false)
     private var snapshotDeviceName by mutableStateOf("Not captured")
     private var snapshotDeviceAddress by mutableStateOf("Unavailable")
@@ -156,11 +157,14 @@ class MainActivity : ComponentActivity() {
     private var rssi by mutableStateOf<Int?>(null)
     private var mtu by mutableStateOf<Int?>(null)
     private val gattOperationTimeout = Runnable {
-        val operation = activeGattOperation
-        if (operation != null) {
-            appendLog("${operation.label} timed out; continuing serialized GATT queue")
-            completeGattOperation(false)
-        }
+        val operation = activeGattOperation ?: return@Runnable
+        appendLog("${operation.label} timed out; aborting this GATT session instead of advancing the queue")
+        activeGattOperation = null
+        val dropped = gattOperationQueue.size
+        gattOperationQueue.clear()
+        if (dropped > 0) appendLog("Discarded $dropped queued operation(s) after timeout")
+        try { operation.onComplete(false) } catch (_: Throwable) {}
+        disconnectGatt("GATT operation timed out: ${operation.label}")
     }
     private var outputRoute by mutableStateOf("No active output route reported")
     private var audioEffectStatus by mutableStateOf("Initializing")
@@ -201,21 +205,6 @@ class MainActivity : ComponentActivity() {
         stopScan()
         appStatus = if (deviceRows.isEmpty()) "Scan complete. No nearby devices found."
         else "Scan complete. Found ${deviceRows.size} device(s)."
-    }
-
-    private val rssiPoll = object : Runnable {
-        override fun run() {
-            if (gatt != null && bleState == "CONNECTED") {
-                enqueueGattOperation(
-                    GattOperation(
-                        label = "Read remote RSSI",
-                        timeoutMs = 2_000L,
-                        start = { active -> active.readRemoteRssi() }
-                    )
-                )
-                mainHandler.postDelayed(this, 10_000L)
-            }
-        }
     }
 
     private val routePoll = object : Runnable {
@@ -269,52 +258,46 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
+                        if (callbackGatt !== gatt) {
+                            appendLog("Ignoring stale GATT connected callback")
+                            try { callbackGatt.close() } catch (_: Throwable) {}
+                            return@runOnUiThread
+                        }
                         if (status != BluetoothGatt.GATT_SUCCESS) appendLog("GATT connected callback reported status $status")
-                        gatt = callbackGatt
                         bleState = "CONNECTED"
                         appStatus = "BLE GATT connected"
                         appendLog("GATT connected to ${safeDeviceName(callbackGatt.device)}")
-                        mainHandler.removeCallbacks(rssiPoll)
-                        enqueueGattOperation(
-                            GattOperation(
-                                label = "Request MTU 517",
-                                timeoutMs = 1_500L,
-                                start = { active -> active.requestMtu(517) },
-                                onComplete = { success ->
-                                    if (!success) appendLog("MTU callback not received/accepted in 1.5s; proceeding with current MTU")
-                                }
-                            )
-                        )
                         enqueueGattOperation(
                             GattOperation(
                                 label = "Discover GATT services",
-                                timeoutMs = 5_000L,
+                                timeoutMs = 12_000L,
                                 start = { active ->
-                                    appendLog("Starting GATT service discovery after MTU phase")
+                                    appendLog("Starting GATT service discovery (default MTU; no concurrent MTU negotiation)")
                                     active.discoverServices()
                                 }
                             )
                         )
-                        mainHandler.postDelayed(rssiPoll, 10_000L)
                     }
                     BluetoothProfile.STATE_CONNECTING -> {
                         bleState = "CONNECTING"
                         appendLog("GATT connecting (status $status)")
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                        if (callbackGatt === gatt) {
+                        val wasCurrentGatt = callbackGatt === gatt
+                        if (wasCurrentGatt) {
                             bleState = "DISCONNECTED"
                             batteryLevel = null
                             rssi = null
                             mtu = null
                             gattSnapshotCached = gattServices.isNotEmpty()
+                            airohaListening = false
                             cancelGattOperations("GATT disconnected")
                             gattServices.flatMap { it.characteristics }.forEach { it.notificationsEnabled = false }
-                            mainHandler.removeCallbacks(rssiPoll)
                             gatt = null
                         }
                         appendLog("GATT disconnected (status $status)")
                         try { callbackGatt.close() } catch (_: Throwable) {}
+                        if (wasCurrentGatt) startPendingGattConnection()
                     }
                 }
             }
@@ -325,9 +308,6 @@ class MainActivity : ComponentActivity() {
                 if (callbackGatt !== gatt) return@runOnUiThread
                 mtu = if (status == BluetoothGatt.GATT_SUCCESS) value else null
                 appendLog("MTU result: ${if (status == BluetoothGatt.GATT_SUCCESS) value else "failed ($status)"}")
-                if (activeGattOperation?.label == "Request MTU 517") {
-                    completeGattOperation(status == BluetoothGatt.GATT_SUCCESS)
-                }
             }
         }
 
@@ -341,7 +321,13 @@ class MainActivity : ComponentActivity() {
                     snapshotDeviceName = safeDeviceName(callbackGatt.device)
                     snapshotDeviceAddress = safeAddress(callbackGatt.device)
                     appendLog("Discovered ${callbackGatt.services.size} GATT service(s); snapshot refreshed")
-                    queueDeviceInformationReads(callbackGatt)
+                    airohaListening = false
+                    if (callbackGatt.getService(BatteryServiceUuid) == null) {
+                        batteryLevel = null
+                        appendLog("Standard Battery Service not exposed; no automatic characteristic reads queued")
+                    } else {
+                        appendLog("Battery Service present; automatic reads remain disabled")
+                    }
                     if (activeGattOperation?.label == "Discover GATT services") completeGattOperation(true)
                 } else {
                     appendLog("Service discovery failed: status $status")
@@ -406,6 +392,7 @@ class MainActivity : ComponentActivity() {
             status: Int
         ) {
             runOnUiThread {
+                if (callbackGatt !== gatt) return@runOnUiThread
                 appendLog("DESCRIPTOR WRITE ${descriptor.uuid}: ${if (status == BluetoothGatt.GATT_SUCCESS) "success" else "failed ($status)"}")
                 if (activeGattOperation?.descriptor === descriptor) completeGattOperation(status == BluetoothGatt.GATT_SUCCESS)
             }
@@ -417,6 +404,7 @@ class MainActivity : ComponentActivity() {
             status: Int
         ) {
             runOnUiThread {
+                if (callbackGatt !== gatt) return@runOnUiThread
                 appendLog("CHARACTERISTIC WRITE ${characteristic.uuid}: ${if (status == BluetoothGatt.GATT_SUCCESS) "success" else "failed ($status)"}")
                 val active = activeGattOperation
                 if (active?.label?.startsWith("WRITE ") == true && active.characteristicUuid == characteristic.uuid) {
@@ -527,6 +515,13 @@ class MainActivity : ComponentActivity() {
                     onMediaKey = { sendMediaKey(it) },
                     services = gattServices.toList(),
                     snapshotCached = gattSnapshotCached,
+                    airohaListening = airohaListening,
+                    canListenAirohaRx = bleState == "CONNECTED" && findAirohaRxRow()?.let {
+                        it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 &&
+                            it.characteristic.getDescriptor(CccdUuid) != null
+                    } == true,
+                    onToggleAirohaListener = { toggleAirohaRxListener() },
+                    airohaCaptureLog = airohaCaptureLog.toList(),
                     classicSdpUuids = classicSdpUuids.toList(),
                     classicSdpStatus = classicSdpStatus,
                     canScanClassicSdp = classicJblDevice != null,
@@ -705,56 +700,103 @@ class MainActivity : ComponentActivity() {
 
     private fun connectGatt(device: BluetoothDevice) {
         if (!hasBluetoothPermissions()) { checkPermissionsAndScan(); return }
-        if (bleState == "CONNECTING") return
-        if (gatt != null && safeAddress(gatt!!.device) == safeAddress(device) && bleState == "CONNECTED") {
-            appStatus = "This device already has a BLE GATT connection."
+        val current = gatt
+        if (current != null) {
+            val sameDevice = safeAddress(current.device) == safeAddress(device)
+            if (sameDevice && (bleState == "CONNECTED" || bleState == "CONNECTING")) {
+                appStatus = if (bleState == "CONNECTED") "This device already has a BLE GATT connection." else "Connection attempt already in progress."
+                return
+            }
+            pendingGattDevice = device
+            if (bleState != "DISCONNECTING") disconnectGatt("Closing the previous GATT session before connecting to the selected device", preservePending = true)
             return
         }
+        startGattConnection(device)
+    }
+
+    private fun startGattConnection(device: BluetoothDevice) {
+        if (gatt != null) { pendingGattDevice = device; return }
         try {
-            disconnectGatt()
             targetDevice = device
             batteryLevel = null
             rssi = null
             mtu = null
+            airohaListening = false
             gattSnapshotCached = gattServices.isNotEmpty()
             bleState = "CONNECTING"
             appStatus = "Connecting to ${safeDeviceName(device)} over BLE…"
             appendLog("GATT connection requested: ${safeDeviceName(device)} (${safeAddress(device)})")
-            gatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-            if (gatt == null) {
+            val createdGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            gatt = createdGatt
+            if (createdGatt == null) {
                 bleState = "DISCONNECTED"
                 appStatus = "Android did not create a GATT client."
                 appendLog("connectGatt returned null")
+                startPendingGattConnection()
             }
             refreshClassicState()
         } catch (_: SecurityException) {
             bleState = "DISCONNECTED"
             appStatus = "Bluetooth connect permission was denied."
+            startPendingGattConnection()
         } catch (error: Throwable) {
             bleState = "DISCONNECTED"
             appStatus = "GATT connection failed: ${error.message ?: "unknown error"}"
+            appendLog(appStatus)
+            startPendingGattConnection()
         }
     }
 
-    private fun disconnectGatt() {
-        mainHandler.removeCallbacks(rssiPoll)
+    private fun disconnectGatt(
+        reason: String = "GATT disconnect requested",
+        preservePending: Boolean = false
+    ) {
         val current = gatt
-        if (current != null) {
-            try { current.disconnect() } catch (_: Throwable) {}
-            mainHandler.postDelayed({
-                try { current.close() } catch (_: Throwable) {}
-                if (gatt === current) gatt = null
-            }, 900L)
+        if (!preservePending) pendingGattDevice = null
+        if (current == null) {
+            bleState = "DISCONNECTED"
+            batteryLevel = null
+            rssi = null
+            mtu = null
+            airohaListening = false
+            gattSnapshotCached = gattServices.isNotEmpty()
+            cancelGattOperations(reason)
+            appStatus = "BLE GATT disconnected"
+            appendLog(reason)
+            return
         }
-        gatt = null
-        bleState = "DISCONNECTED"
+        if (bleState == "DISCONNECTING") return
+        bleState = "DISCONNECTING"
+        appStatus = "Disconnecting BLE GATT…"
         batteryLevel = null
         rssi = null
         mtu = null
+        airohaListening = false
         gattSnapshotCached = gattServices.isNotEmpty()
-        cancelGattOperations("GATT disconnect requested")
-        appStatus = "BLE GATT disconnected"
-        appendLog("GATT disconnect requested")
+        cancelGattOperations(reason)
+        gattServices.flatMap { it.characteristics }.forEach { it.notificationsEnabled = false }
+        appendLog(reason)
+        try { current.disconnect() } catch (error: Throwable) {
+            appendLog("GATT disconnect request failed: ${error.message ?: "unknown"}")
+        }
+        mainHandler.postDelayed({
+            if (gatt === current) {
+                try { current.close() } catch (_: Throwable) {}
+                gatt = null
+                bleState = "DISCONNECTED"
+                gattSnapshotCached = gattServices.isNotEmpty()
+                appendLog("Closed GATT client after disconnect fallback")
+                startPendingGattConnection()
+            }
+        }, 1_800L)
+    }
+
+    private fun startPendingGattConnection() {
+        val next = pendingGattDevice ?: return
+        pendingGattDevice = null
+        mainHandler.post {
+            if (gatt == null) startGattConnection(next) else pendingGattDevice = next
+        }
     }
 
     private fun enqueueGattOperation(operation: GattOperation) {
@@ -779,7 +821,7 @@ class MainActivity : ComponentActivity() {
             false
         }
         if (!accepted) {
-            appendLog("${operation.label} was not accepted by Android Bluetooth")
+            appendLog("${operation.label} was not accepted by Android Bluetooth; stopping the remaining queue")
             completeGattOperation(false)
             return
         }
@@ -794,6 +836,12 @@ class MainActivity : ComponentActivity() {
         try { finished?.onComplete?.invoke(success) } catch (error: Throwable) {
             appendLog("${finished?.label ?: "GATT operation"} completion handler failed: ${error.message ?: "unknown"}")
         }
+        if (!success) {
+            val dropped = gattOperationQueue.size
+            gattOperationQueue.clear()
+            appendLog("${finished?.label ?: "GATT operation"} failed; GATT queue halted${if (dropped > 0) " and $dropped pending operation(s) discarded" else ""}")
+            return
+        }
         if (gatt != null && bleState == "CONNECTED") mainHandler.post { drainGattOperationQueue() }
     }
 
@@ -803,34 +851,6 @@ class MainActivity : ComponentActivity() {
         activeGattOperation = null
         gattOperationQueue.clear()
         if (pending > 0) appendLog("Cancelled $pending queued GATT operation(s): $reason")
-    }
-
-    private fun queueDeviceInformationReads(activeGatt: BluetoothGatt) {
-        val deviceInfoService = activeGatt.getService(DeviceInformationServiceUuid)
-        if (deviceInfoService == null) {
-            appendLog("Device Information Service (180A) not exposed")
-        } else {
-            DeviceInformationCharacteristicUuids.forEach { characteristicUuid ->
-                val characteristic = deviceInfoService.getCharacteristic(characteristicUuid)
-                if (characteristic == null) {
-                    appendLog("Device information characteristic $characteristicUuid not exposed")
-                } else if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) {
-                    enqueueCharacteristicRead(characteristic, "READ DEVICE INFO")
-                } else {
-                    appendLog("Device information characteristic $characteristicUuid is not readable")
-                }
-            }
-        }
-
-        val batteryCharacteristic = activeGatt.getService(BatteryServiceUuid)?.getCharacteristic(BatteryLevelUuid)
-        if (batteryCharacteristic == null) {
-            batteryLevel = null
-            appendLog("Standard Battery Service not exposed by this device")
-        } else if (batteryCharacteristic.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) {
-            enqueueCharacteristicRead(batteryCharacteristic, "READ BATTERY")
-        } else {
-            appendLog("Standard Battery Level characteristic is not readable")
-        }
     }
 
     private fun enqueueCharacteristicRead(
@@ -862,6 +882,15 @@ class MainActivity : ComponentActivity() {
                 val value = bytes[0].toInt() and 0xFF
                 batteryLevel = value.takeIf { it in 0..100 }
             }
+            if (serviceUuid == AirohaRaceServiceUuid && characteristic.uuid == AirohaRxCharacteristicUuid &&
+                operation == "NOTIFY" && status == BluetoothGatt.GATT_SUCCESS
+            ) {
+                val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+                val capture = "[$time] RX bytes=${bytes.size} HEX[$hex]"
+                airohaCaptureLog.add(0, capture)
+                while (airohaCaptureLog.size > 500) airohaCaptureLog.removeAt(airohaCaptureLog.lastIndex)
+                appendLog("AIROHA RX PACKET bytes=${bytes.size} HEX[$hex]")
+            }
             appendLog("$operation ${characteristic.uuid} status=$status HEX[$hex] UTF8[$utf8]")
         }
     }
@@ -873,6 +902,57 @@ class MainActivity : ComponentActivity() {
         }
         enqueueCharacteristicRead(row.characteristic)
     }
+
+    private fun findAirohaRxRow(): GattCharacteristicRow? =
+        gattServices.firstOrNull { it.uuid == AirohaRaceServiceUuid }
+            ?.characteristics?.firstOrNull { it.uuid == AirohaRxCharacteristicUuid }
+
+    private fun toggleAirohaRxListener() {
+        val activeGatt = gatt
+        val row = findAirohaRxRow()
+        if (activeGatt == null || bleState != "CONNECTED" || row == null) {
+            appendLog("Airoha RX listener unavailable: connect and discover the Airoha RACE service first")
+            return
+        }
+        val characteristic = row.characteristic
+        val descriptor = characteristic.getDescriptor(CccdUuid)
+        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY == 0 || descriptor == null) {
+            appendLog("Airoha RX listener unavailable: RX notification property or CCCD is missing")
+            return
+        }
+        val enable = !row.notificationsEnabled
+        try {
+            if (!activeGatt.setCharacteristicNotification(characteristic, enable)) {
+                appendLog("Android rejected local Airoha RX notification registration")
+                return
+            }
+            descriptor.value = if (enable) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            enqueueGattOperation(
+                GattOperation(
+                    label = "${if (enable) "ENABLE" else "DISABLE"} Airoha RX notifications",
+                    timeoutMs = 6_000L,
+                    start = { it.writeDescriptor(descriptor) },
+                    descriptor = descriptor,
+                    onComplete = { success ->
+                        row.notificationsEnabled = success && enable
+                        airohaListening = success && enable
+                        if (!success) {
+                            try { activeGatt.setCharacteristicNotification(characteristic, false) } catch (_: Throwable) {}
+                        }
+                        appendLog(
+                            if (success && enable) "Airoha RX passive listener enabled"
+                            else if (success) "Airoha RX passive listener stopped"
+                            else "Airoha RX CCCD subscription failed"
+                        )
+                    }
+                )
+            )
+        } catch (error: Throwable) {
+            appendLog("Airoha RX listener setup failed: ${error.message ?: "unknown error"}")
+        }
+    }
+
 
     private fun toggleNotifications(row: GattCharacteristicRow) {
         val activeGatt = gatt ?: return
@@ -917,6 +997,11 @@ class MainActivity : ComponentActivity() {
     private fun writeSelectedCharacteristic() {
         val row = writeTarget ?: return
         val activeGatt = gatt ?: return
+        if (row.serviceUuid == AirohaRaceServiceUuid && row.uuid == AirohaTxCharacteristicUuid) {
+            appendLog("WRITE BLOCKED: Airoha RACE TX is deliberately read-only in VERLYN 0.1.4")
+            writeTarget = null
+            return
+        }
         val bytes = parseHex(writeHexInput)
         if (bytes == null || bytes.isEmpty()) {
             Toast.makeText(this, "Enter valid hex bytes, for example: 01 FF 0A", Toast.LENGTH_SHORT).show(); return
@@ -1015,7 +1100,7 @@ class MainActivity : ComponentActivity() {
     private fun copyGattDump() {
         val target = targetDevice
         val dump = buildString {
-            appendLine("VERLYN 0.1.3 — GATT DUMP")
+            appendLine("VERLYN 0.1.4 — BLUETOOTH PROTOCOL DUMP")
             appendLine("Device: ${target?.let { safeDeviceName(it) } ?: "Not selected"}")
             appendLine("Address: ${target?.let { safeAddress(it) } ?: "Unavailable"}")
             appendLine("BLE state: $bleState")
@@ -1044,6 +1129,11 @@ class MainActivity : ComponentActivity() {
             appendLine("SDP status: $classicSdpStatus")
             if (classicSdpUuids.isEmpty()) appendLine("No Classic SDP UUIDs captured")
             else classicSdpUuids.forEach { appendLine("CLASSIC SERVICE UUID $it") }
+            appendLine()
+            appendLine("AIROHA RACE RX PASSIVE CAPTURE LOG")
+            appendLine("Listener active: $airohaListening")
+            if (airohaCaptureLog.isEmpty()) appendLine("No Airoha RX packets captured")
+            else airohaCaptureLog.asReversed().forEach { appendLine(it) }
             appendLine()
             appendLine("PACKET / OPERATION LOG")
             packetLog.asReversed().forEach { appendLine(it) }
@@ -1141,7 +1231,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        stopScan(); mainHandler.removeCallbacks(rssiPoll)
+        stopScan(); 
         super.onPause()
     }
 
@@ -1203,6 +1293,10 @@ private fun VerlynApp(
     onMediaKey: (Int) -> Unit,
     services: List<GattServiceRow>,
     snapshotCached: Boolean,
+    airohaListening: Boolean,
+    canListenAirohaRx: Boolean,
+    onToggleAirohaListener: () -> Unit,
+    airohaCaptureLog: List<String>,
     classicSdpUuids: List<UUID>,
     classicSdpStatus: String,
     canScanClassicSdp: Boolean,
@@ -1250,7 +1344,8 @@ private fun VerlynApp(
                     effectStatus, selectedPreset, onPreset
                 )
                 else -> InspectorPage(
-                    bleState, services, snapshotCached, classicSdpUuids, classicSdpStatus,
+                    bleState, services, snapshotCached, airohaListening, canListenAirohaRx,
+                    onToggleAirohaListener, airohaCaptureLog, classicSdpUuids, classicSdpStatus,
                     canScanClassicSdp, onScanClassicSdp, inspectorExpanded, onInspectorExpanded,
                     onReadCharacteristic, onToggleNotify, onRequestWrite, packetLog, onCopyDump
                 )
@@ -1498,6 +1593,10 @@ private fun InspectorPage(
     bleState: String,
     services: List<GattServiceRow>,
     snapshotCached: Boolean,
+    airohaListening: Boolean,
+    canListenAirohaRx: Boolean,
+    onToggleAirohaListener: () -> Unit,
+    airohaCaptureLog: List<String>,
     classicSdpUuids: List<UUID>,
     classicSdpStatus: String,
     canScanClassicSdp: Boolean,
@@ -1532,13 +1631,44 @@ private fun InspectorPage(
             }
         }
         Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(16.dp)) {
+            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("AIROHA RACE · PASSIVE RX LISTENER", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text(
+                            if (airohaListening) "Listening for RX notifications — press the physical ANC / Ambient Aware button"
+                            else if (canListenAirohaRx) "Ready · notification-only capture; no Airoha TX payload writes"
+                            else "Connect to JBL Tune 770NC-LE and discover the Airoha RACE service",
+                            color = if (airohaListening) Green else Muted,
+                            fontSize = 10.sp
+                        )
+                    }
+                    Switch(
+                        checked = airohaListening,
+                        onCheckedChange = { onToggleAirohaListener() },
+                        enabled = canListenAirohaRx
+                    )
+                }
+                Text("Only RX 43484152-2DAB-3141-6972-6F6861424C45 is subscribed. VERLYN never sends unverified RACE commands.", color = Muted, fontSize = 9.sp)
+                Text("AIROHA RX CAPTURE · ${airohaCaptureLog.size} PACKET(S)", color = Blue, fontWeight = FontWeight.SemiBold, fontSize = 10.sp)
+                if (airohaCaptureLog.isEmpty()) {
+                    Text("No Airoha RX packets captured yet.", color = Muted, fontSize = 10.sp)
+                } else {
+                    airohaCaptureLog.take(100).forEach { line ->
+                        Text(line, color = Color(0xFFC5D0DE), fontSize = 9.sp, lineHeight = 13.sp)
+                        Divider(color = PanelSoft)
+                    }
+                }
+            }
+        }
+        Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(16.dp)) {
             Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                Text("CLASSIC BLUETOOTH SDP", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text("CLASSIC RFCOMM / SDP SCANNER", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 Button(
                     onClick = onScanClassicSdp,
                     enabled = canScanClassicSdp,
                     colors = ButtonDefaults.buttonColors(containerColor = Blue)
-                ) { Text("SCAN CLASSIC SDP UUIDS") }
+                ) { Text("SCAN CLASSIC RFCOMM / SDP UUIDS") }
                 Text(classicSdpStatus, color = Muted, fontSize = 10.sp)
                 if (classicSdpUuids.isEmpty()) {
                     Text("No Classic Service UUIDs captured yet.", color = Muted, fontSize = 10.sp)
@@ -1566,9 +1696,8 @@ private fun InspectorPage(
                         Card(colors = CardDefaults.cardColors(containerColor = PanelSoft), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().padding(top = 9.dp)) {
                             Column(Modifier.fillMaxWidth().padding(10.dp)) {
                                 Row(Modifier.fillMaxWidth().clickable { service.expanded = !service.expanded }, verticalAlignment = Alignment.CenterVertically) {
-                                    Text("SERVICE", color = Blue, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                    Spacer(Modifier.width(7.dp))
-                                    Text(service.uuid.toString(), color = Color.White, fontSize = 10.sp, modifier = Modifier.weight(1f))
+                                    Text(serviceDisplayName(service.uuid), color = Blue, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                    Text(service.uuid.toString(), color = Color.White, fontSize = 9.sp)
                                     Text(if (service.expanded) "−" else "+", color = Blue)
                                 }
                                 if (service.expanded) service.characteristics.forEach { row ->
@@ -1607,8 +1736,10 @@ private fun CharacteristicCard(
 ) {
     val props = row.properties
     val canRead = props and BluetoothGattCharacteristic.PROPERTY_READ != 0
-    val canWrite = props and (BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-    val canNotify = props and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+    val isProtectedAirohaTx = row.serviceUuid == AirohaRaceServiceUuid && row.uuid == AirohaTxCharacteristicUuid
+    val canWrite = !isProtectedAirohaTx && props and (BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+    val isDedicatedAirohaRx = row.serviceUuid == AirohaRaceServiceUuid && row.uuid == AirohaRxCharacteristicUuid
+    val canNotify = !isDedicatedAirohaRx && props and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
     Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
         Text("CHARACTERISTIC ${row.uuid}", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(top = 4.dp)) {
@@ -1644,6 +1775,17 @@ private fun RowScope.TelemetryItem(label: String, value: String) {
         Text(label, color = Muted, fontSize = 8.sp, letterSpacing = 1.sp)
         Text(value, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
+}
+
+private fun serviceDisplayName(uuid: UUID): String = when (uuid) {
+    AirohaRaceServiceUuid -> "Airoha RACE"
+    GoogleFastPairServiceUuid -> "Google Fast Pair"
+    AmazonAmaServiceUuid -> "Amazon Alexa AMA"
+    DultServiceUuid -> "DULT Tracker"
+    UUID.fromString("00001800-0000-1000-8000-00805f9b34fb") -> "Generic Access"
+    UUID.fromString("00001801-0000-1000-8000-00805f9b34fb") -> "Generic Attribute"
+    UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb") -> "Device Information"
+    else -> "Vendor / Bluetooth service"
 }
 
 private fun propertyNames(properties: Int): List<String> = buildList {
