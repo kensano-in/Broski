@@ -62,6 +62,7 @@
             android:name=".VerlynAssistActivity"
             android:exported="true"
             android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
             android:theme="@android:style/Theme.NoDisplay"
             android:showWhenLocked="true"
             android:turnScreenOn="false">
