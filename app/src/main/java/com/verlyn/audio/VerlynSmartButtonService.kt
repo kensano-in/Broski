@@ -31,7 +31,6 @@ class VerlynSmartButtonService : AccessibilityService() {
         runCatching {
             val requested = serviceInfo
             requested.flags = requested.flags or
-                AccessibilityServiceInfo.FLAG_DEFAULT or
                 AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
             serviceInfo = requested
         }.onFailure { logKey("Could not enable key filtering · " + (it.message ?: "serviceInfo update failed")) }

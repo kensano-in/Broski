@@ -146,10 +146,14 @@ class ClassicRfcommEngine(
                 if (group == FAST_PAIR_GROUP) {
                     when (code) {
                         BATTERY_UPDATED_CODE -> {
-                            val levels = payload.mapNotNull { encoded ->
-                                val raw = encoded.toInt() and 0xFF
-                                if (raw == UNKNOWN_LEVEL || raw == UNKNOWN_LEVEL_WITH_CHARGE) null
-                                else (raw and 0x7F).takeIf { it in 0..100 }
+                            val levels = buildList {
+                                payload.forEach { encoded ->
+                                    val raw = encoded.toInt() and 0xFF
+                                    if (raw != UNKNOWN_LEVEL && raw != UNKNOWN_LEVEL_WITH_CHARGE) {
+                                        val percent = raw and 0x7F
+                                        if (percent in 0..100) add(percent)
+                                    }
+                                }
                             }
                             if (levels.isNotEmpty()) onBattery(levels)
                         }

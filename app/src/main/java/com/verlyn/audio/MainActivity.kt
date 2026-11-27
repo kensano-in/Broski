@@ -1669,7 +1669,7 @@ class MainActivity : ComponentActivity() {
             if (!audioEngine.hasGlobalMixEffect()) audioEngine.attachGlobal(gains, currentPreamp, enabled, limited, channelBalance)
             else audioEngine.apply(gains, currentPreamp, enabled, limited, channelBalance)
             if (sessionCompatibility) compatibilitySessions.forEach {
-                audioEngine.attachSession(it, gains, currentPreamp, enabled, limited, channelBalance)
+                audioEngine.attachSession(it, "Unknown media app", gains, currentPreamp, enabled, limited, channelBalance)
             }
         }
     }

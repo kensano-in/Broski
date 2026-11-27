@@ -45,16 +45,15 @@ class EqTestAudioPlayer(
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build()
-                sessionId = AudioTrack.generateAudioSessionId()
-                if (sessionId <= 0) throw IllegalStateException("Android did not allocate an audio session ID")
                 val createdTrack = AudioTrack.Builder()
                     .setAudioAttributes(attributes)
                     .setAudioFormat(format)
                     .setBufferSizeInBytes(8_192)
                     .setTransferMode(AudioTrack.MODE_STREAM)
-                    .setSessionId(sessionId)
                     .build()
                 track = createdTrack
+                sessionId = createdTrack.audioSessionId
+                if (sessionId <= 0) throw IllegalStateException("Android did not allocate an audio session ID")
                 if (createdTrack.state != AudioTrack.STATE_INITIALIZED) {
                     throw IllegalStateException("AudioTrack failed to initialize")
                 }
