@@ -24,7 +24,7 @@ import android.content.Context
 import android.content.ComponentName
 import android.companion.AssociationRequest
 import android.companion.CompanionDeviceManager
-import android.bluetooth.le.BluetoothDeviceFilter
+import android.companion.BluetoothDeviceFilter
 import android.net.Uri
 import android.os.PowerManager
 import android.content.Intent
@@ -1449,7 +1449,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isSmartAccessibilityEnabled(): Boolean = runCatching {
-        val selected = Settings.Secure.getString(contentResolver, Settings.Secure.VOICE_INTERACTION_SERVICE).orEmpty()
+        val selected = Settings.Secure.getString(contentResolver, "voice_interaction_service").orEmpty()
         selected.contains(packageName, ignoreCase = true) &&
             selected.contains(VerlynAssistantVoiceInteractionService::class.java.simpleName, ignoreCase = true)
     }.getOrDefault(false)
