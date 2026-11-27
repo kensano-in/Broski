@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.verlyn.audio
 
 import android.content.Context

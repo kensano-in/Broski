@@ -308,7 +308,7 @@ private fun ControlDashboard(
             LockedSetting("Voice Prompts", "Language selection")
             LockedSetting("Voice Assistant", "Assistant selection")
             LockedSetting("LE Audio", "Capability negotiation")
-            Divider(color = VZinc2)
+            HorizontalDivider(color = VZinc2)
             Text("DEVICE INFORMATION", color = VWhite, fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
             Text("JBL Tune 770NC · Classic SDP services: " + state.classicSdpUuids.size + " · BLE services: " + state.gattSnapshotLines.count { it.startsWith("SERVICE") }, color = VMuted, fontSize = 10.sp)
             Text("Proprietary controls stay locked until a verified protocol and safe command/response pair are available.", color = VMuted, fontSize = 9.sp)
@@ -352,7 +352,7 @@ private fun ProEqualizerPage(state: VerlynProUiState, actions: VerlynProUiAction
                     TextButton(onClick = { presetName = preset.name; renameTarget = preset }) { Text("RENAME", fontSize = 9.sp) }
                     TextButton(onClick = { actions.onDeletePreset(preset.name) }) { Text("DELETE", fontSize = 9.sp, color = VOrange) }
                 }
-                Divider(color = VZinc2)
+                HorizontalDivider(color = VZinc2)
             }
             Button(onClick = { presetName = ""; saveDialog = true }, colors = ButtonDefaults.buttonColors(containerColor = VBlue), modifier = Modifier.fillMaxWidth()) {
                 Text("SAVE CURRENT EQ AS PRESET")
@@ -361,7 +361,7 @@ private fun ProEqualizerPage(state: VerlynProUiState, actions: VerlynProUiAction
         ProCard {
             Text("PREAMP", fontWeight = FontWeight.Bold, fontSize = 12.sp)
             ValueSlider(state.preamp, -12f, 12f, actions.onPreampChange, "dB")
-            Divider(color = VZinc2)
+            HorizontalDivider(color = VZinc2)
             Text("FREQUENCY BANDS", fontWeight = FontWeight.Bold, fontSize = 12.sp)
             eqLabels.forEachIndexed { index, label ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -443,7 +443,7 @@ private fun SmartActionsPage(state: VerlynProUiState, actions: VerlynProUiAction
                         }
                     }
                 }
-                Divider(color = VZinc2)
+                HorizontalDivider(color = VZinc2)
             }
             Text("Defaults: hold Volume Down = time; hold Volume Up = battery; double Volume Down = cycle EQ; double Volume Up = limiter.", color = VMuted, fontSize = 9.sp)
         }
@@ -529,7 +529,7 @@ private fun ProInspectorPage(state: VerlynProUiState, actions: VerlynProUiAction
             }
             Text("Airoha TX writes are blocked. Passive capture only.", color = VMuted, fontSize = 9.sp)
             LogLines(state.airohaCaptureLog, "No Airoha RX packets captured.")
-            Divider(color = VZinc2)
+            HorizontalDivider(color = VZinc2)
             Text(state.gattSnapshotTitle, color = VBlue, fontWeight = FontWeight.Bold, fontSize = 10.sp)
             if (state.gattSnapshotLines.isEmpty()) Text("No GATT snapshot captured yet.", color = VMuted, fontSize = 10.sp)
             else state.gattSnapshotLines.forEach { Text(it, color = VWhite, fontSize = 8.sp) }
@@ -671,6 +671,6 @@ private fun LogLines(lines: List<String>, empty: String) {
     if (lines.isEmpty()) Text(empty, color = VMuted, fontSize = 9.sp)
     else lines.take(80).forEach { line ->
         Text(line, color = Color(0xFFD4D4D8), fontSize = 8.sp, lineHeight = 12.sp)
-        Divider(color = VZinc2)
+        HorizontalDivider(color = VZinc2)
     }
 }

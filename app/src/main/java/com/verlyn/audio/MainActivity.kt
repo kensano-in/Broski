@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.verlyn.audio
 
 import android.Manifest
@@ -1797,7 +1799,7 @@ private fun ControlPage(
                     }
                     StatusPill(bleState, if (bleState == "CONNECTED") Green else if (bleState == "CONNECTING") Blue else Muted)
                 }
-                Divider(color = PanelSoft)
+                HorizontalDivider(color = PanelSoft)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("AUDIO: ${if (audioConnected) "CONNECTED" else "DISCONNECTED"}", color = if (audioConnected) Green else Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -1942,7 +1944,7 @@ private fun EqualizerPage(
                     Slider(value = preamp, onValueChange = onPreampChange, valueRange = -12f..12f, steps = 23, modifier = Modifier.weight(1f))
                     Text("${"%.1f".format(Locale.US, preamp)} dB", modifier = Modifier.width(64.dp), color = Blue, fontSize = 11.sp)
                 }
-                Divider(color = PanelSoft)
+                HorizontalDivider(color = PanelSoft)
                 labels.forEachIndexed { index, label ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(label, modifier = Modifier.width(53.dp), fontSize = 11.sp, color = Muted)
@@ -1961,7 +1963,7 @@ private fun EqualizerPage(
                     }
                     Switch(checked = limiterEnabled, onCheckedChange = onLimiterChange)
                 }
-                Divider(color = PanelSoft)
+                HorizontalDivider(color = PanelSoft)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("SESSION COMPATIBILITY MODE", fontWeight = FontWeight.Bold, fontSize = 11.sp)
@@ -2043,7 +2045,7 @@ private fun InspectorPage(
                 } else {
                     airohaCaptureLog.take(100).forEach { line ->
                         Text(line, color = Color(0xFFC5D0DE), fontSize = 9.sp, lineHeight = 13.sp)
-                        Divider(color = PanelSoft)
+                        HorizontalDivider(color = PanelSoft)
                     }
                 }
             }
@@ -2107,7 +2109,7 @@ private fun InspectorPage(
                 Text("LIVE OPERATION & PACKET LOG", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 Text("Newest entries first · ${packetLog.size} captured events", color = Muted, fontSize = 10.sp)
                 if (packetLog.isEmpty()) Text("No GATT operations captured yet.", color = Muted, fontSize = 11.sp)
-                else packetLog.take(120).forEach { line -> Text(line, color = Color(0xFFC5D0DE), fontSize = 9.sp, lineHeight = 13.sp); Divider(color = PanelSoft) }
+                else packetLog.take(120).forEach { line -> Text(line, color = Color(0xFFC5D0DE), fontSize = 9.sp, lineHeight = 13.sp); HorizontalDivider(color = PanelSoft) }
             }
         }
     }
@@ -2145,7 +2147,7 @@ private fun CharacteristicCard(
             if (interactionsEnabled && canNotify) OutlinedButton(onClick = { onNotify(row) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 1.dp)) { Text(if (row.notificationsEnabled) "STOP NOTIFY" else "NOTIFY / INDICATE", fontSize = 9.sp) }
             if (interactionsEnabled && canWrite) Button(onClick = { onWrite(row) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 1.dp), colors = ButtonDefaults.buttonColors(containerColor = Blue)) { Text("SAFE HEX WRITE", fontSize = 9.sp) }
         }
-        Divider(color = Color(0xFF303A49), modifier = Modifier.padding(top = 8.dp))
+        HorizontalDivider(color = Color(0xFF303A49), modifier = Modifier.padding(top = 8.dp))
     }
 }
 

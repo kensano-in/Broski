@@ -142,7 +142,7 @@ private fun ControlTab(s: VerlynProUiState, a: VerlynProUiActions) {
                     Text("BATTERY", color = VMuted, fontSize = 8.sp)
                 }
             }
-            Divider(color = VBorder)
+            HorizontalDivider(color = VBorder)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
                     Text("BLUETOOTH AUDIO", color = VMuted, fontSize = 9.sp)
@@ -341,7 +341,7 @@ private fun SmartTab(s: VerlynProUiState, a: VerlynProUiActions, pick: (String) 
                     }
                     Text("CHANGE  ›", color = VBlueLight, fontSize = 9.sp)
                 }
-                Divider(color = VBorder)
+                HorizontalDivider(color = VBorder)
             }
         }
     }
