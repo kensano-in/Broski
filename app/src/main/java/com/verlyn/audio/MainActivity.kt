@@ -1094,10 +1094,8 @@ class MainActivity : ComponentActivity() {
         if (lastAppliedJblRoute != jblActive) {
             lastAppliedJblRoute = jblActive
             if (jblActive) restoreJblEqProfile()
-            if (::audioEngine.isInitialized) {
-                audioEngine.setRouteActive(jblActive)
-                applyAudioSettings()
-            }
+            audioEngine.setRouteActive(jblActive)
+            applyAudioSettings()
         }
     }
 
